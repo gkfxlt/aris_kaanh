@@ -14,18 +14,23 @@
 using namespace aris::dynamic;
 using namespace aris::plan;
 
-
-extern double fce_data[buffer_length];
-extern int data_num, data_num_send;
-extern std::atomic_int which_di;
-extern std::atomic_bool is_automatic;
+//global vel//
 extern kaanh::Speed g_vel;
 extern std::atomic_int g_vel_percent;
-static kaanh::CmdListParam cmdparam;
+//global vel//
+
+//state machine flag//
+extern std::atomic_bool g_error;
+extern std::atomic_bool g_is_manual;
+extern std::atomic_bool g_is_auto;
+//state machine flag//
+
+kaanh::CmdListParam cmdparam;
 
 
 namespace kaanh
 {
+	std::atomic_bool g_move_stop = false;
 	aris::dynamic::Marker tool1;
 	auto createInterface()->std::unique_ptr<aris::server::InterfaceRoot>
 	{
@@ -724,6 +729,359 @@ namespace kaanh
 	}
 
 
+#define CHECK_PARAM_STRING \
+		"		<UniqueParam default=\"check_all\">" \
+		"			<Param name=\"check_all\"/>" \
+		"			<Param name=\"check_none\"/>" \
+		"			<GroupParam>"\
+		"				<UniqueParam default=\"check_enable\">"\
+		"					<Param name=\"check_enable\"/>"\
+		"					<Param name=\"not_check_enable\"/>"\
+		"				</UniqueParam>"\
+		"				<UniqueParam default=\"check_pos\">"\
+		"					<Param name=\"check_pos\"/>"\
+		"					<Param name=\"not_check_pos\"/>"\
+		"					<GroupParam>"\
+		"						<UniqueParam default=\"check_pos_max\">"\
+		"							<Param name=\"check_pos_max\"/>"\
+		"							<Param name=\"not_check_pos_max\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_pos_min\">"\
+		"							<Param name=\"check_pos_min\"/>"\
+		"							<Param name=\"not_check_pos_min\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_pos_continuous\">"\
+		"							<Param name=\"check_pos_continuous\"/>"\
+		"							<Param name=\"not_check_pos_continuous\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_pos_continuous_second_order\">"\
+		"							<Param name=\"check_pos_continuous_second_order\"/>"\
+		"							<Param name=\"not_check_pos_continuous_second_order\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_pos_following_error\">"\
+		"							<Param name=\"check_pos_following_error\"/>"\
+		"							<Param name=\"not_check_pos_following_error\"/>"\
+		"						</UniqueParam>"\
+		"					</GroupParam>"\
+		"				</UniqueParam>"\
+		"				<UniqueParam default=\"check_vel\">"\
+		"					<Param name=\"check_vel\"/>"\
+		"					<Param name=\"not_check_vel\"/>"\
+		"					<GroupParam>"\
+		"						<UniqueParam default=\"check_vel_max\">"\
+		"							<Param name=\"check_vel_max\"/>"\
+		"							<Param name=\"not_check_vel_max\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_vel_min\">"\
+		"							<Param name=\"check_vel_min\"/>"\
+		"							<Param name=\"not_check_vel_min\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_vel_continuous\">"\
+		"							<Param name=\"check_vel_continuous\"/>"\
+		"							<Param name=\"not_check_vel_continuous\"/>"\
+		"						</UniqueParam>"\
+		"						<UniqueParam default=\"check_vel_following_error\">"\
+		"							<Param name=\"check_vel_following_error\"/>"\
+		"							<Param name=\"not_check_vel_following_error\"/>"\
+		"						</UniqueParam>"\
+		"					</GroupParam>"\
+		"				</UniqueParam>"\
+		"			</GroupParam>"\
+		"		</UniqueParam>"
+	auto set_check_option(const std::map<std::string, std::string> &cmd_params, PlanTarget &target)->void
+	{
+		for (auto cmd_param : cmd_params)
+		{
+			if (cmd_param.first == "check_all")
+			{
+				for (auto &option : target.mot_options)	option &= ~(
+					Plan::NOT_CHECK_POS_MIN |
+					Plan::NOT_CHECK_POS_MAX |
+					Plan::NOT_CHECK_POS_CONTINUOUS |
+					Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER |
+					Plan::NOT_CHECK_POS_FOLLOWING_ERROR |
+					Plan::NOT_CHECK_VEL_MIN |
+					Plan::NOT_CHECK_VEL_MAX |
+					Plan::NOT_CHECK_VEL_CONTINUOUS |
+					Plan::NOT_CHECK_VEL_FOLLOWING_ERROR);
+			}
+			else if (cmd_param.first == "check_none")
+			{
+				for (auto &option : target.mot_options)	option |=
+					Plan::NOT_CHECK_POS_MIN |
+					Plan::NOT_CHECK_POS_MAX |
+					Plan::NOT_CHECK_POS_CONTINUOUS |
+					Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER |
+					Plan::NOT_CHECK_POS_FOLLOWING_ERROR |
+					Plan::NOT_CHECK_VEL_MIN |
+					Plan::NOT_CHECK_VEL_MAX |
+					Plan::NOT_CHECK_VEL_CONTINUOUS |
+					Plan::NOT_CHECK_VEL_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "check_enable")
+			{
+				for (auto &option : target.mot_options) option &= ~(
+					Plan::NOT_CHECK_ENABLE);
+			}
+			else if (cmd_param.first == "not_check_enable")
+			{
+				for (auto &option : target.mot_options) option |=
+					Plan::NOT_CHECK_ENABLE;
+			}
+			else if (cmd_param.first == "check_pos")
+			{
+				for (auto &option : target.mot_options) option &= ~(
+					Plan::NOT_CHECK_POS_MIN |
+					Plan::NOT_CHECK_POS_MAX |
+					Plan::NOT_CHECK_POS_CONTINUOUS |
+					Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER |
+					Plan::NOT_CHECK_POS_FOLLOWING_ERROR);
+			}
+			else if (cmd_param.first == "not_check_pos")
+			{
+				for (auto &option : target.mot_options) option |=
+					Plan::NOT_CHECK_POS_MIN |
+					Plan::NOT_CHECK_POS_MAX |
+					Plan::NOT_CHECK_POS_CONTINUOUS |
+					Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER |
+					Plan::NOT_CHECK_POS_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "check_vel")
+			{
+				for (auto &option : target.mot_options) option &= ~(
+					Plan::NOT_CHECK_VEL_MIN |
+					Plan::NOT_CHECK_VEL_MAX |
+					Plan::NOT_CHECK_VEL_CONTINUOUS |
+					Plan::NOT_CHECK_VEL_FOLLOWING_ERROR);
+			}
+			else if (cmd_param.first == "not_check_vel")
+			{
+				for (auto &option : target.mot_options) option |=
+					Plan::NOT_CHECK_VEL_MIN |
+					Plan::NOT_CHECK_VEL_MAX |
+					Plan::NOT_CHECK_VEL_CONTINUOUS |
+					Plan::NOT_CHECK_VEL_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "check_pos_min")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_POS_MIN;
+			}
+			else if (cmd_param.first == "not_check_pos_min")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_POS_MIN;
+			}
+			else if (cmd_param.first == "check_pos_max")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_POS_MAX;
+			}
+			else if (cmd_param.first == "not_check_pos_max")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_POS_MAX;
+			}
+			else if (cmd_param.first == "check_pos_continuous")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_POS_CONTINUOUS;
+			}
+			else if (cmd_param.first == "not_check_pos_continuous")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_POS_CONTINUOUS;
+			}
+			else if (cmd_param.first == "check_pos_continuous_second_order")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER;
+			}
+			else if (cmd_param.first == "not_check_pos_continuous_second_order")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER;
+			}
+			else if (cmd_param.first == "check_pos_following_error")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_POS_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "not_check_pos_following_error")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_POS_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "check_vel_min")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_VEL_MIN;
+			}
+			else if (cmd_param.first == "not_check_vel_min")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_VEL_MIN;
+			}
+			else if (cmd_param.first == "check_vel_max")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_VEL_MAX;
+			}
+			else if (cmd_param.first == "not_check_vel_max")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_VEL_MAX;
+			}
+			else if (cmd_param.first == "check_vel_continuous")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_VEL_CONTINUOUS;
+			}
+			else if (cmd_param.first == "not_check_vel_continuous")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_VEL_CONTINUOUS;
+			}
+			else if (cmd_param.first == "check_vel_following_error")
+			{
+				for (auto &option : target.mot_options) option &= ~Plan::NOT_CHECK_VEL_FOLLOWING_ERROR;
+			}
+			else if (cmd_param.first == "not_check_vel_following_error")
+			{
+				for (auto &option : target.mot_options) option |= Plan::NOT_CHECK_VEL_FOLLOWING_ERROR;
+			}
+		}
+	}
+
+	struct SetActiveMotor { std::vector<int> active_motor; };
+#define SELECT_MOTOR_STRING \
+		"		<UniqueParam default=\"all\">"\
+		"			<Param name=\"all\" abbreviation=\"a\"/>"\
+		"			<Param name=\"motion_id\" abbreviation=\"m\" default=\"0\"/>"\
+		"			<Param name=\"physical_id\" abbreviation=\"p\" default=\"0\"/>"\
+		"			<Param name=\"slave_id\" abbreviation=\"s\" default=\"0\"/>"\
+		"		</UniqueParam>"
+	auto set_active_motor(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, SetActiveMotor &param)->void
+	{
+		param.active_motor.clear();
+		param.active_motor.resize(target.controller->motionPool().size(), 0);
+
+		for (auto cmd_param : cmd_params)
+		{
+			if (cmd_param.first == "all")
+			{
+				std::fill(param.active_motor.begin(), param.active_motor.end(), 1);
+			}
+			else if (cmd_param.first == "motion_id")
+			{
+				param.active_motor.at(std::stoi(cmd_param.second)) = 1;
+			}
+			else if (cmd_param.first == "physical_id")
+			{
+				param.active_motor.at(target.controller->motionAtPhy(std::stoi(cmd_param.second)).motId()) = 1;
+			}
+			else if (cmd_param.first == "slave_id")
+			{
+				param.active_motor.at(target.controller->motionAtSla(std::stoi(cmd_param.second)).motId()) = 1;
+			}
+		}
+	}
+
+	struct SetInputMovement
+	{
+		std::vector<double> axis_begin_pos_vec;
+		std::vector<double> axis_pos_vec;
+		std::vector<double> axis_vel_vec;
+		std::vector<double> axis_acc_vec;
+		std::vector<double> axis_dec_vec;
+	};
+#define SET_INPUT_MOVEMENT_STRING \
+		"		<Param name=\"pos\" default=\"0.5\"/>"\
+		"		<Param name=\"acc\" default=\"0.1\"/>"\
+		"		<Param name=\"vel\" default=\"0.1\"/>"\
+		"		<Param name=\"dec\" default=\"0.1\"/>"
+	auto set_input_movement(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, SetInputMovement &param)->void
+	{
+		param.axis_begin_pos_vec.resize(target.controller->motionPool().size(), 0.0);
+		for (auto cmd_param : cmd_params)
+		{
+			if (cmd_param.first == "pos")
+			{
+				auto p = target.model->calculator().calculateExpression(cmd_param.second);
+				if (p.size() == 1)
+				{
+					param.axis_pos_vec.resize(target.controller->motionPool().size(), p.toDouble());
+				}
+				else if (p.size() == target.controller->motionPool().size())
+				{
+					param.axis_pos_vec.assign(p.begin(), p.end());
+				}
+				else
+				{
+					THROW_FILE_LINE("");
+				}
+			}
+			else if (cmd_param.first == "acc")
+			{
+				auto a = target.model->calculator().calculateExpression(cmd_param.second);
+
+				if (a.size() == 1)
+				{
+					param.axis_acc_vec.resize(target.controller->motionPool().size(), a.toDouble());
+				}
+				else if (a.size() == target.controller->motionPool().size())
+				{
+					param.axis_acc_vec.assign(a.begin(), a.end());
+				}
+				else
+				{
+					THROW_FILE_LINE("");
+				}
+
+			}
+			else if (cmd_param.first == "vel")
+			{
+				auto v = target.model->calculator().calculateExpression(cmd_param.second);
+
+				if (v.size() == 1)
+				{
+					param.axis_vel_vec.resize(target.controller->motionPool().size(), v.toDouble());
+				}
+				else if (v.size() == target.controller->motionPool().size())
+				{
+					param.axis_vel_vec.assign(v.begin(), v.end());
+				}
+				else
+				{
+					THROW_FILE_LINE("");
+				}
+			}
+			else if (cmd_param.first == "dec")
+			{
+				auto d = target.model->calculator().calculateExpression(cmd_param.second);
+
+				if (d.size() == 1)
+				{
+					param.axis_dec_vec.resize(target.controller->motionPool().size(), d.toDouble());
+				}
+				else if (d.size() == target.controller->motionPool().size())
+				{
+					param.axis_dec_vec.assign(d.begin(), d.end());
+				}
+				else
+				{
+					THROW_FILE_LINE("");
+				}
+			}
+		}
+	}
+	auto check_input_movement(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, SetInputMovement &param, SetActiveMotor &active)->void
+	{
+		auto c = target.controller;
+		for (Size i = 0; i < c->motionPool().size(); ++i)
+		{
+			if (active.active_motor[i])
+			{
+				if (param.axis_pos_vec[i] > c->motionPool()[i].maxPos() || param.axis_pos_vec[i] < c->motionPool()[i].minPos())
+					THROW_FILE_LINE("input pos beyond range");
+
+				if (param.axis_vel_vec[i] > c->motionPool()[i].maxVel() || param.axis_vel_vec[i] <= 0.0)
+					THROW_FILE_LINE("input vel beyond range");
+
+				if (param.axis_acc_vec[i] > c->motionPool()[i].maxAcc() || param.axis_acc_vec[i] <= 0.0)
+					THROW_FILE_LINE("input acc beyond range");
+
+				if (param.axis_dec_vec[i] > c->motionPool()[i].maxAcc() || param.axis_dec_vec[i] <= 0.0)
+					THROW_FILE_LINE("input dec beyond range");
+			}
+		}
+	}
+
+
 	// 获取part_pq，end_pq，end_pe等 //
 	struct GetParam
 	{
@@ -752,7 +1110,6 @@ namespace kaanh
 		std::any param = par;
 		//std::any param = std::make_any<GetParam>();
 
-		
 		target.server->getRtData([&](aris::server::ControlServer& cs, const aris::plan::PlanTarget *target, std::any& data)->void
 		{
 			for (aris::Size i(-1); ++i < cs.model().partPool().size();)
@@ -850,8 +1207,539 @@ namespace kaanh
 			"</Command>");
 	}
 
+	struct EnableParam :public SetActiveMotor { std::int32_t limit_time; };
+	struct Enable::Imp {};
+	auto Enable::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		EnableParam param;
 
-	//走圆弧//
+		set_check_option(params, target);
+		set_active_motor(params, target, param);
+		param.limit_time = std::stoi(params.at("limit_time"));
+
+		target.param = param;
+
+		for (auto &option : target.mot_options) option |= aris::plan::Plan::NOT_CHECK_ENABLE | aris::plan::Plan::NOT_CHECK_POS_MAX | aris::plan::Plan::NOT_CHECK_POS_MIN;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Enable::executeRT(PlanTarget &target)->int
+	{
+		auto &param = std::any_cast<EnableParam &>(target.param);
+
+		bool is_all_finished = true;
+		for (std::size_t i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				auto &cm = target.controller->motionPool().at(i);
+				auto ret = cm.enable();
+				if (ret)
+				{
+					is_all_finished = false;
+
+					if (target.count % 1000 == 0)
+					{
+						target.controller->mout() << "Unenabled motor, slave id: " << cm.id()
+							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+					}
+				}
+			}
+		}
+
+		return is_all_finished ? 0 : (target.count < param.limit_time ? 1 : aris::plan::PlanTarget::PLAN_OVER_TIME);
+	}
+	Enable::~Enable() = default;
+	Enable::Enable(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"en\">"
+			"	<GroupParam>"
+			"		<Param name=\"limit_time\" default=\"5000\"/>"
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Enable);
+
+	struct DisableParam :public SetActiveMotor { std::int32_t limit_time; };
+	struct Disable::Imp {};
+	auto Disable::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		DisableParam param;
+
+		set_check_option(params, target);
+		set_active_motor(params, target, param);
+		param.limit_time = std::stoi(params.at("limit_time"));
+
+		target.param = param;
+		for (auto &option : target.mot_options) option |= aris::plan::Plan::NOT_CHECK_ENABLE | aris::plan::Plan::NOT_CHECK_POS_MAX | aris::plan::Plan::NOT_CHECK_POS_MIN;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Disable::executeRT(PlanTarget &target)->int
+	{
+		auto &param = std::any_cast<DisableParam &>(target.param);
+
+		bool is_all_finished = true;
+		for (std::size_t i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				auto &cm = target.controller->motionPool().at(i);
+				auto ret = cm.disable();
+				if (ret)
+				{
+					is_all_finished = false;
+
+					if (target.count % 1000 == 0)
+					{
+						target.controller->mout() << "Undisabled motor, slave id: " << cm.id()
+							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+					}
+				}
+			}
+		}
+
+		return is_all_finished ? 0 : (target.count < param.limit_time ? 1 : aris::plan::PlanTarget::PLAN_OVER_TIME);
+	}
+	Disable::~Disable() = default;
+	Disable::Disable(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"ds\">"
+			"	<GroupParam>"
+			"		<Param name=\"limit_time\" default=\"5000\"/>"
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Disable);
+
+	struct HomeParam :public SetActiveMotor
+	{
+		std::int32_t limit_time;
+		double offset;
+	};
+	struct Home::Imp {};
+	auto Home::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		HomeParam param;
+
+		set_active_motor(params, target, param);
+		param.limit_time = std::stoi(params.at("limit_time"));
+
+		for (aris::Size i = 0; i < param.active_motor.size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				std::int8_t method = std::stoi(params.at(std::string("method")));
+				if (method < 1 || method > 35) THROW_FILE_LINE("invalid home method");
+
+				param.offset = std::stod(params.at(std::string("offset")));
+				std::int32_t offset = std::stoi(params.at(std::string("offset")));
+				std::uint32_t high_speed = std::stoi(params.at(std::string("high_speed")));
+				std::uint32_t low_speed = std::stoi(params.at(std::string("low_speed")));
+				std::uint32_t acc = std::stoi(params.at(std::string("acceleration")));
+
+				auto &cm = dynamic_cast<aris::control::EthercatMotion &>(target.controller->motionPool()[i]);
+
+				cm.writeSdo(0x6098, 0x00, method);
+				std::int8_t method_read;
+				cm.readSdo(0x6098, 0x00, method_read);
+				if (method_read != method)THROW_FILE_LINE("home sdo write failed method");
+				cm.writeSdo(0x607C, 0x00, offset);
+				std::int32_t offset_read;
+				cm.readSdo(0x607C, 0x00, offset_read);
+				if (offset_read != offset)THROW_FILE_LINE("home sdo write failed offset");
+				cm.writeSdo(0x6099, 0x01, high_speed);
+				std::int32_t high_speed_read;
+				cm.readSdo(0x6099, 0x01, high_speed_read);
+				if (high_speed_read != high_speed)THROW_FILE_LINE("home sdo write failed high_speed");
+				cm.writeSdo(0x6099, 0x02, low_speed);
+				std::int32_t low_speed_read;
+				cm.readSdo(0x6099, 0x02, low_speed_read);
+				if (low_speed_read != low_speed)THROW_FILE_LINE("home sdo write failed low_speed");
+				cm.writeSdo(0x609A, 0x00, acc);
+				std::int32_t acc_read;
+				cm.readSdo(0x609A, 0x00, acc_read);
+				if (acc_read != acc)THROW_FILE_LINE("home sdo write failed acc");
+
+			}
+		}
+
+		target.param = param;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Home::executeRT(PlanTarget &target)->int
+	{
+		auto &param = std::any_cast<HomeParam &>(target.param);
+
+		bool is_all_finished = true;
+		for (std::size_t i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				auto &cm = target.controller->motionPool().at(i);
+				auto ret = cm.home();
+				if (ret)
+				{
+					is_all_finished = false;
+
+					if (target.count % 1000 == 0)
+					{
+						target.controller->mout() << "Unhomed motor, slave id: " << cm.id()
+							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+					}
+				}
+				else
+				{
+					param.active_motor[i] = false;
+				}
+			}
+		}
+
+		return is_all_finished ? 0 : 1;
+	}
+	Home::~Home() = default;
+	Home::Home(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"hm\">"
+			"	<GroupParam>"
+			"		<Param name=\"method\" default=\"35\"/>"
+			"		<Param name=\"offset\" default=\"0\"/>"
+			"		<Param name=\"high_speed\" default=\"20000\"/>"
+			"		<Param name=\"low_speed\" default=\"20\"/>"
+			"		<Param name=\"acceleration\" default=\"100000\"/>"
+			"		<Param name=\"limit_time\" default=\"5000\"/>"
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Home);
+
+	struct ModeParam :public SetActiveMotor { std::int32_t limit_time, mode; };
+	struct Mode::Imp {};
+	auto Mode::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		ModeParam param;
+
+		set_check_option(params, target);
+		set_active_motor(params, target, param);
+		param.limit_time = std::stoi(params.at("limit_time"));
+		param.mode = std::stoi(params.at("mode"));
+
+		if (param.mode > 10 && param.mode < 8)THROW_FILE_LINE("invalid mode, aris now only support mode 8,9,10");
+
+		target.param = param;
+		for (auto &option : target.mot_options) option |= aris::plan::Plan::NOT_CHECK_ENABLE | aris::plan::Plan::NOT_CHECK_POS_MAX | aris::plan::Plan::NOT_CHECK_POS_MIN;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Mode::executeRT(PlanTarget &target)->int
+	{
+		auto &param = std::any_cast<ModeParam &>(target.param);
+
+		bool is_all_finished = true;
+		for (std::size_t i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				auto &cm = target.controller->motionPool().at(i);
+				auto ret = cm.mode(param.mode);
+				if (target.count == 1)
+				{
+					switch (param.mode)
+					{
+					case 8:
+						cm.setTargetPos(cm.actualPos());
+						break;
+					case 9:
+						cm.setTargetVel(0.0);
+						break;
+					case 10:
+						cm.setTargetToq(0.0);
+						break;
+					default:
+						break;
+					}
+				}
+
+				if (ret)
+				{
+					is_all_finished = false;
+
+					if (target.count % 1000 == 0)
+					{
+						target.controller->mout() << "Unmoded motor, slave id: " << cm.id()
+							<< ", absolute id: " << i << ", ret: " << ret << std::endl;
+					}
+				}
+			}
+		}
+
+		return is_all_finished ? 0 : (target.count < param.limit_time ? 1 : aris::plan::PlanTarget::PLAN_OVER_TIME);
+	}
+	Mode::~Mode() = default;
+	Mode::Mode(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"md\">"
+			"	<GroupParam>"
+			"		<Param name=\"limit_time\" default=\"5000\"/>"
+			"       <Param name=\"mode\" abbreviation=\"d\" default=\"8\"/>"
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Mode);
+
+	struct ResetParam :public SetActiveMotor, SetInputMovement { std::vector<Size> total_count_vec; };
+	struct Reset::Imp {};
+	auto Reset::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		ResetParam param;
+		set_check_option(params, target);
+		set_active_motor(params, target, param);
+		set_input_movement(params, target, param);
+
+		for (Size i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			auto &cm = target.controller->motionPool()[i];
+			param.axis_pos_vec[i] = param.axis_pos_vec[i] * (cm.maxPos() - cm.minPos()) + cm.minPos();
+			param.axis_acc_vec[i] = param.axis_acc_vec[i] * cm.maxAcc();
+			param.axis_vel_vec[i] = param.axis_vel_vec[i] * cm.maxVel();
+			param.axis_dec_vec[i] = param.axis_dec_vec[i] * cm.maxAcc();
+		}
+		check_input_movement(params, target, param, param);
+
+		param.total_count_vec.resize(target.controller->motionPool().size(), 1);
+
+		target.param = param;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Reset::executeRT(PlanTarget &target)->int
+	{
+		auto &param = std::any_cast<ResetParam&>(target.param);
+
+		// 取得起始位置 //
+		if (target.count == 1)
+		{
+			for (Size i = 0; i < target.controller->motionPool().size(); ++i)
+			{
+				if (param.active_motor[i])
+				{
+					param.axis_begin_pos_vec[i] = target.controller->motionPool().at(i).actualPos();
+				}
+			}
+		}
+
+		// 设置驱动器的位置 //
+		for (Size i = 0; i < target.controller->motionPool().size(); ++i)
+		{
+			if (param.active_motor[i])
+			{
+				double p, v, a;
+				aris::plan::moveAbsolute(static_cast<double>(target.count), param.axis_begin_pos_vec[i], param.axis_pos_vec[i], param.axis_vel_vec[i] / 1000
+					, param.axis_acc_vec[i] / 1000 / 1000, param.axis_dec_vec[i] / 1000 / 1000, p, v, a, param.total_count_vec[i]);
+				target.controller->motionAtAbs(i).setTargetPos(p);
+			}
+		}
+
+		return (static_cast<int>(*std::max_element(param.total_count_vec.begin(), param.total_count_vec.end())) > target.count) ? 1 : 0;
+	}
+	Reset::~Reset() = default;
+	Reset::Reset(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"rs\">"
+			"	<GroupParam>"
+			SET_INPUT_MOVEMENT_STRING
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Reset);
+
+	struct RecoverParam
+	{
+		std::atomic_bool is_kinematic_ready_;
+		std::atomic_bool is_rt_waiting_ready_;
+		std::future<void> fut;
+		int kin_ret;
+	};
+	auto Recover::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		auto p = std::make_shared<RecoverParam>();
+
+		p->is_kinematic_ready_ = false;
+		p->is_rt_waiting_ready_ = false;
+		p->fut = std::async(std::launch::async, [](std::shared_ptr<RecoverParam> p, PlanTarget &target)
+		{
+			// 等待正解求解的需求 //
+			while (!p->is_rt_waiting_ready_.load())std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+			// 求正解 //
+			p->kin_ret = target.model->solverPool()[1].kinPos();
+
+			// 通知实时线程 //
+			p->is_kinematic_ready_.store(true);
+		}, p, std::ref(target));
+
+		target.param = p;
+		for (auto &option : target.mot_options) option |= NOT_CHECK_ENABLE | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Recover::executeRT(PlanTarget &target)->int
+	{
+		auto param = std::any_cast<std::shared_ptr<RecoverParam> &>(target.param);
+
+		if (target.count < 3)
+		{
+			for (Size i = 0; i < std::min(target.controller->motionPool().size(), target.model->motionPool().size()); ++i)
+			{
+				target.controller->motionPool()[i].setTargetPos(target.controller->motionPool().at(i).actualPos());
+				target.model->motionPool()[i].setMp(target.controller->motionPool().at(i).actualPos());
+			}
+
+			param->is_rt_waiting_ready_.store(true);
+
+			return 1;
+		}
+
+		return param->is_kinematic_ready_.load() ? param->kin_ret : 1;
+	}
+	auto Recover::collectNrt(PlanTarget &target)->void
+	{
+		if (target.count)
+		{
+			std::any_cast<std::shared_ptr<RecoverParam>&>(target.param)->fut.get();
+		}
+		else
+		{
+			// 此时前面指令出错，系统清理了该命令，这时设置一下 //
+			std::any_cast<std::shared_ptr<RecoverParam>&>(target.param)->is_rt_waiting_ready_.store(true);
+			std::any_cast<std::shared_ptr<RecoverParam>&>(target.param)->fut.get();
+		}
+	}
+	Recover::~Recover() = default;
+	Recover::Recover(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"rc\">"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Recover);
+
+	struct SleepParam { int count; };
+	struct Sleep::Imp {};
+	auto Sleep::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		target.param = SleepParam{ std::stoi(params.at("count")) };
+		for (auto &option : target.mot_options) option |= NOT_CHECK_ENABLE;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto Sleep::executeRT(PlanTarget &target)->int { return std::any_cast<SleepParam&>(target.param).count - target.count; }
+	Sleep::~Sleep() = default;
+	Sleep::Sleep(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"sl\">"
+			"	<Param name=\"count\" default=\"1000\" abbreviation=\"c\"/>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(Sleep);
+
+
+	struct MoveAbsJParam :public SetActiveMotor, SetInputMovement {};
+	auto MoveAbsJ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		MoveAbsJParam param;
+
+		set_check_option(params, target);
+		set_active_motor(params, target, param);
+		set_input_movement(params, target, param);
+		check_input_movement(params, target, param, param);
+
+		param.axis_begin_pos_vec.resize(target.controller->motionPool().size());
+		target.param = param;
+		for (auto &option : target.mot_options) option |= aris::plan::Plan::NOT_CHECK_ENABLE;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto MoveAbsJ::executeRT(PlanTarget &target)->int
+	{
+		auto param = std::any_cast<MoveAbsJParam>(&target.param);
+
+		if (target.count == 1)
+		{
+			for (Size i = 0; i < param->active_motor.size(); ++i)
+			{
+				if (param->active_motor[i])
+				{
+					param->axis_begin_pos_vec[i] = target.controller->motionPool()[i].targetPos();
+				}
+			}
+		}
+
+		aris::Size total_count{ 1 };
+		for (Size i = 0; i < param->active_motor.size(); ++i)
+		{
+			if (param->active_motor[i])
+			{
+				double p, v, a;
+				aris::Size t_count;
+				aris::plan::moveAbsolute(target.count,
+					param->axis_begin_pos_vec[i], param->axis_pos_vec[i],
+					param->axis_vel_vec[i] / 1000, param->axis_acc_vec[i] / 1000 / 1000, param->axis_dec_vec[i] / 1000 / 1000,
+					p, v, a, t_count);
+				target.controller->motionPool()[i].setTargetPos(p);
+				total_count = std::max(total_count, t_count);
+			}
+		}
+
+		if (g_move_stop)
+		{
+			return -4;
+		}
+		return total_count - target.count;
+	}
+	struct MoveAbsJ::Imp {};
+	MoveAbsJ::~MoveAbsJ() = default;
+	MoveAbsJ::MoveAbsJ(const std::string &name) : Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"mvaj\">"
+			"	<GroupParam>"
+			"		<Param name=\"pos\" default=\"0.0\"/>"
+			"		<Param name=\"vel\" default=\"1.0\"/>"
+			"		<Param name=\"acc\" default=\"1.0\"/>"
+			"		<Param name=\"dec\" default=\"1.0\"/>"
+			SELECT_MOTOR_STRING
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(MoveAbsJ);
+
 	auto check_eul_validity(const std::string &eul_type)->bool
 	{
 		if (eul_type.size() < 3)return false;
@@ -862,6 +1750,361 @@ namespace kaanh
 
 		return true;
 	}
+	auto find_pq(const std::map<std::string, std::string> &params, PlanTarget &target, double *pq_out)->bool
+	{
+		double pos_unit;
+		auto pos_unit_found = params.find("pos_unit");
+		if (pos_unit_found == params.end()) pos_unit = 1.0;
+		else if (pos_unit_found->second == "m")pos_unit = 1.0;
+		else if (pos_unit_found->second == "mm")pos_unit = 0.001;
+		else if (pos_unit_found->second == "cm")pos_unit = 0.01;
+		else THROW_FILE_LINE("");
+
+		for (auto cmd_param : params)
+		{
+			if (cmd_param.first == "pq")
+			{
+				auto pq_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (pq_mat.size() != 7)THROW_FILE_LINE("");
+				aris::dynamic::s_vc(7, pq_mat.data(), pq_out);
+				aris::dynamic::s_nv(3, pos_unit, pq_out);
+				return true;
+			}
+			else if (cmd_param.first == "pm")
+			{
+				auto pm_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (pm_mat.size() != 16)THROW_FILE_LINE("");
+				aris::dynamic::s_pm2pq(pm_mat.data(), pq_out);
+				aris::dynamic::s_nv(3, pos_unit, pq_out);
+				return true;
+			}
+			else if (cmd_param.first == "pe")
+			{
+				double ori_unit;
+				auto ori_unit_found = params.find("ori_unit");
+				if (ori_unit_found == params.end()) ori_unit = 1.0;
+				else if (ori_unit_found->second == "rad")ori_unit = 1.0;
+				else if (ori_unit_found->second == "degree")ori_unit = PI / 180.0;
+				else THROW_FILE_LINE("");
+
+				std::string eul_type;
+				auto eul_type_found = params.find("eul_type");
+				if (eul_type_found == params.end()) eul_type = "321";
+				else if (check_eul_validity(eul_type_found->second.data()))	eul_type = eul_type_found->second;
+				else THROW_FILE_LINE("");
+
+				auto pe_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (pe_mat.size() != 6)THROW_FILE_LINE("");
+				aris::dynamic::s_nv(3, ori_unit, pe_mat.data() + 3);
+				aris::dynamic::s_pe2pq(pe_mat.data(), pq_out, eul_type.data());
+				aris::dynamic::s_nv(3, pos_unit, pq_out);
+				return true;
+			}
+		}
+
+		THROW_FILE_LINE("No pose input");
+	}
+	struct MoveJParam
+	{
+		std::vector<double> joint_vel, joint_acc, joint_dec, ee_pq, joint_pos_begin, joint_pos_end;
+		std::vector<Size> total_count;
+	};
+	struct MoveJ::Imp {};
+	auto MoveJ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		set_check_option(params, target);
+
+		MoveJParam mvj_param;
+
+		// find ee pq //
+		mvj_param.ee_pq.resize(7);
+		find_pq(params, target, mvj_param.ee_pq.data());
+
+		mvj_param.joint_pos_begin.resize(target.model->motionPool().size(), 0.0);
+		mvj_param.joint_pos_end.resize(target.model->motionPool().size(), 0.0);
+		mvj_param.total_count.resize(target.model->motionPool().size(), 0);
+
+		// find joint acc/vel/dec/
+		for (auto cmd_param : params)
+		{
+			auto c = target.controller;
+			if (cmd_param.first == "joint_acc")
+			{
+				mvj_param.joint_acc.clear();
+				mvj_param.joint_acc.resize(target.model->motionPool().size(), 0.0);
+
+				auto acc_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (acc_mat.size() == 1)std::fill(mvj_param.joint_acc.begin(), mvj_param.joint_acc.end(), acc_mat.toDouble());
+				else if (acc_mat.size() == target.model->motionPool().size()) std::copy(acc_mat.begin(), acc_mat.end(), mvj_param.joint_acc.begin());
+				else THROW_FILE_LINE("");
+
+				for (int i = 0; i < 6; ++i)mvj_param.joint_acc[i] *= target.controller->motionPool()[i].maxAcc();
+
+				// check value validity //
+				for (Size i = 0; i < std::min(target.model->motionPool().size(), c->motionPool().size()); ++i)
+					if (mvj_param.joint_acc[i] <= 0 || mvj_param.joint_acc[i] > c->motionPool()[i].maxAcc())
+						THROW_FILE_LINE("");
+			}
+			else if (cmd_param.first == "joint_vel")
+			{
+				mvj_param.joint_vel.clear();
+				mvj_param.joint_vel.resize(target.model->motionPool().size(), 0.0);
+
+				auto vel_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (vel_mat.size() == 1)std::fill(mvj_param.joint_vel.begin(), mvj_param.joint_vel.end(), vel_mat.toDouble());
+				else if (vel_mat.size() == target.model->motionPool().size()) std::copy(vel_mat.begin(), vel_mat.end(), mvj_param.joint_vel.begin());
+				else THROW_FILE_LINE("");
+
+				for (int i = 0; i < 6; ++i)mvj_param.joint_vel[i] *= target.controller->motionPool()[i].maxVel();
+
+				// check value validity //
+				for (Size i = 0; i < std::min(target.model->motionPool().size(), c->motionPool().size()); ++i)
+					if (mvj_param.joint_vel[i] <= 0 || mvj_param.joint_vel[i] > c->motionPool()[i].maxVel())
+						THROW_FILE_LINE("");
+			}
+			else if (cmd_param.first == "joint_dec")
+			{
+				mvj_param.joint_dec.clear();
+				mvj_param.joint_dec.resize(target.model->motionPool().size(), 0.0);
+
+				auto dec_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (dec_mat.size() == 1)std::fill(mvj_param.joint_dec.begin(), mvj_param.joint_dec.end(), dec_mat.toDouble());
+				else if (dec_mat.size() == target.model->motionPool().size()) std::copy(dec_mat.begin(), dec_mat.end(), mvj_param.joint_dec.begin());
+				else THROW_FILE_LINE("");
+
+				for (int i = 0; i < 6; ++i) mvj_param.joint_dec[i] *= target.controller->motionPool()[i].maxAcc();
+
+				// check value validity //
+				for (Size i = 0; i < std::min(target.model->motionPool().size(), c->motionPool().size()); ++i)
+					if (mvj_param.joint_dec[i] <= 0 || mvj_param.joint_dec[i] > c->motionPool()[i].maxAcc())
+						THROW_FILE_LINE("");
+			}
+		}
+
+		target.param = mvj_param;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto MoveJ::executeRT(PlanTarget &target)->int
+	{
+		auto mvj_param = std::any_cast<MoveJParam>(&target.param);
+		auto controller = target.controller;
+
+		// 取得起始位置 //
+		double p, v, a;
+		static Size max_total_count;
+		if (target.count == 1)
+		{
+			// inverse kinematic //
+			double end_pm[16];
+			aris::dynamic::s_pq2pm(mvj_param->ee_pq.data(), end_pm);
+			target.model->generalMotionPool().at(0).setMpm(end_pm);
+			if (target.model->solverPool().at(0).kinPos())return -1;
+
+			// init joint_pos //
+			for (Size i = 0; i < std::min(controller->motionPool().size(), target.model->motionPool().size()); ++i)
+			{
+				mvj_param->joint_pos_begin[i] = controller->motionPool()[i].targetPos();
+				mvj_param->joint_pos_end[i] = target.model->motionPool()[i].mp();
+				aris::plan::moveAbsolute(target.count, mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i]
+					, mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000
+					, p, v, a, mvj_param->total_count[i]);
+			}
+
+			max_total_count = *std::max_element(mvj_param->total_count.begin(), mvj_param->total_count.end());
+		}
+
+		for (Size i = 0; i < std::min(controller->motionPool().size(), target.model->motionPool().size()); ++i)
+		{
+			aris::plan::moveAbsolute(static_cast<double>(target.count) * mvj_param->total_count[i] / max_total_count,
+				mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i],
+				mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000,
+				p, v, a, mvj_param->total_count[i]);
+
+			controller->motionPool()[i].setTargetPos(p);
+			target.model->motionPool()[i].setMp(p);
+		}
+		if (target.model->solverPool().at(1).kinPos())return -1;
+
+		if (g_move_stop)
+		{
+			return -4;
+		}
+		return max_total_count == 0 ? 0 : max_total_count - target.count;
+	}
+	MoveJ::~MoveJ() = default;
+	MoveJ::MoveJ(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"mvj\">"
+			"	<GroupParam>"
+			"		<Param name=\"pos_unit\" default=\"m\"/>"
+			"		<UniqueParam default=\"pq\">"
+			"			<Param name=\"pq\" default=\"{0,0,0,0,0,0,1}\"/>"
+			"			<Param name=\"pm\" default=\"{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}\"/>"
+			"			<GroupParam>"
+			"				<Param name=\"pe\" default=\"{0,0,0,0,0,0}\"/>"
+			"				<Param name=\"ori_unit\" default=\"rad\"/>"
+			"				<Param name=\"eul_type\" default=\"321\"/>"
+			"			</GroupParam>"
+			"		</UniqueParam>"
+			"		<Param name=\"joint_acc\" default=\"0.1\"/>"
+			"		<Param name=\"joint_vel\" default=\"0.1\"/>"
+			"		<Param name=\"joint_dec\" default=\"0.1\"/>"
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(MoveJ);
+
+	struct MoveLParam
+	{
+		std::vector<double> joint_vel, joint_acc, joint_dec, ee_pq, joint_pos_begin, joint_pos_end;
+		Size total_count[6];
+
+		double acc, vel, dec;
+		double angular_acc, angular_vel, angular_dec;
+	};
+	struct MoveL::Imp {};
+	auto MoveL::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		set_check_option(params, target);
+
+		MoveLParam mvl_param;
+		mvl_param.ee_pq.resize(7);
+		if (!find_pq(params, target, mvl_param.ee_pq.data()))THROW_FILE_LINE("");
+
+		for (auto cmd_param : params)
+		{
+			if (cmd_param.first == "acc")
+			{
+				mvl_param.acc = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "vel")
+			{
+				mvl_param.vel = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "dec")
+			{
+				mvl_param.dec = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "angular_acc")
+			{
+				mvl_param.angular_acc = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "angular_vel")
+			{
+				mvl_param.angular_vel = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "angular_dec")
+			{
+				mvl_param.angular_dec = std::stod(cmd_param.second);
+			}
+		}
+
+		for (auto &option : target.mot_options)	option |= USE_TARGET_POS;
+		target.param = mvl_param;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	auto MoveL::executeRT(PlanTarget &target)->int
+	{
+		auto mvl_param = std::any_cast<MoveLParam>(&target.param);
+		auto controller = target.controller;
+
+		// 取得起始位置 //
+		static double begin_pm[16], relative_pm[16], relative_pa[6], pos_ratio, ori_ratio, norm_pos, norm_ori;
+		double p, v, a;
+		aris::Size pos_total_count, ori_total_count;
+		if (target.count == 1)
+		{
+			double end_pm[16];
+			aris::dynamic::s_pq2pm(mvl_param->ee_pq.data(), end_pm);
+			target.model->generalMotionPool().at(0).updMpm();
+			target.model->generalMotionPool().at(0).getMpm(begin_pm);
+			aris::dynamic::s_inv_pm_dot_pm(begin_pm, end_pm, relative_pm);
+
+			// relative_pa //
+			aris::dynamic::s_pm2pa(relative_pm, relative_pa);
+
+			norm_pos = aris::dynamic::s_norm(3, relative_pa);
+			norm_ori = aris::dynamic::s_norm(3, relative_pa + 3);
+
+			aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->dec / 1000 / 1000, p, v, a, pos_total_count);
+			aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_dec / 1000 / 1000, p, v, a, ori_total_count);
+
+			pos_ratio = pos_total_count < ori_total_count ? double(pos_total_count) / ori_total_count : 1.0;
+			ori_ratio = ori_total_count < pos_total_count ? double(ori_total_count) / pos_total_count : 1.0;
+
+			aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+			aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		}
+
+		double pa[6]{ 0,0,0,0,0,0 }, pm[16], pm2[16];
+
+		aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+		if (norm_pos > 1e-10)aris::dynamic::s_vc(3, p / norm_pos, relative_pa, pa);
+
+		aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		if (norm_ori > 1e-10)aris::dynamic::s_vc(3, p / norm_ori, relative_pa + 3, pa + 3);
+
+		aris::dynamic::s_pa2pm(pa, pm);
+		aris::dynamic::s_pm_dot_pm(begin_pm, pm, pm2);
+
+		// 反解计算电机位置 //
+		target.model->generalMotionPool().at(0).setMpm(pm2);
+		if (target.model->solverPool().at(0).kinPos())return -1;
+
+		////////////////////////////////////// log ///////////////////////////////////////
+		//double pq[7];
+		//aris::dynamic::s_pm2pq(*target.model->generalMotionPool().at(0).mpm(), pq);
+		//target.controller->lout() << target.count << " " << pq[0] << " " << pq[1] << " " << pq[2] << " " << pq[3] << " " << pq[4] << " " << pq[5] << " " << pq[6] << "  ";
+
+		//for (auto &cm : controller->motionPool())
+		//{
+		//	target.controller->lout() << "  " << cm.targetPos() << "  " << cm.actualPos() << "  " << cm.actualVel() << "  " << cm.actualCur() << "  ";
+		//}
+		//target.controller->lout() << "\n";
+		//////////////////////////////////////////////////////////////////////////////////
+
+		if (g_move_stop)
+		{
+			return -4;
+		}
+		return std::max(pos_total_count, ori_total_count) > target.count ? 1 : 0;
+	}
+	MoveL::~MoveL() = default;
+	MoveL::MoveL(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"mvl\">"
+			"	<GroupParam>"
+			"		<Param name=\"pos_unit\" default=\"m\"/>"
+			"		<UniqueParam default=\"pq\">"
+			"			<Param name=\"pq\" default=\"{0,0,0,0,0,0,1}\"/>"
+			"			<Param name=\"pm\" default=\"{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1}\"/>"
+			"			<GroupParam>"
+			"				<Param name=\"pe\" default=\"{0,0,0,0,0,0}\"/>"
+			"				<Param name=\"ori_unit\" default=\"rad\"/>"
+			"				<Param name=\"eul_type\" default=\"321\"/>"
+			"			</GroupParam>"
+			"		</UniqueParam>"
+			"		<Param name=\"acc\" default=\"0.1\"/>"
+			"		<Param name=\"vel\" default=\"0.1\"/>"
+			"		<Param name=\"dec\" default=\"0.1\"/>"
+			"		<Param name=\"angular_acc\" default=\"0.1\"/>"
+			"		<Param name=\"angular_vel\" default=\"0.1\"/>"
+			"		<Param name=\"angular_dec\" default=\"0.1\"/>"
+			CHECK_PARAM_STRING
+			"	</GroupParam>"
+			"</Command>");
+	}
+	ARIS_DEFINE_BIG_FOUR_CPP(MoveL);
+
+
+	//走圆弧//
 	auto find_mid_pq(const std::map<std::string, std::string> &params, PlanTarget &target, double *mid_pq_out)->bool
 	{
 		double pos_unit;
@@ -1203,7 +2446,10 @@ namespace kaanh
 			lout << std::endl;
 		}
 		//////////////////////////////////////////////////////////////////////////////////
-
+		if (g_move_stop)
+		{
+			return -4;
+		}
 		return std::max(pos_total_count, ori_total_count) > target.count ? 1 : 0;
 	}
 	MoveC::~MoveC() = default;
@@ -1890,6 +3136,18 @@ namespace kaanh
 	JogJ& JogJ::operator=(JogJ &&other) = default;
 
 
+#define JOGJ_PARAM_STRING \
+		"	<UniqueParam>"\
+		"		<GroupParam>"\
+		"			<Param name=\"increase_count\" default=\"500\"/>"\
+		"			<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"\
+		"			<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"\
+		"			<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"\
+		"			<Param name=\"vel_percent\" default=\"10\"/>"\
+		"			<Param name=\"direction\" default=\"1\"/>"\
+		"		</GroupParam>"\
+		"		<Param name=\"stop\"/>"\
+		"	</UniqueParam>"
 	// 示教运动--关节1点动 //
 	struct JogJParam 
 	{
@@ -1901,8 +3159,10 @@ namespace kaanh
 		int vel_percent;
 		static std::atomic_int32_t j1_count, j2_count, j3_count, j4_count, j5_count, j6_count;
 	};
-	auto set_jogj_input_param(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, JogJParam &param)->void
+	template<typename JogType>
+	auto set_jogj_input_param(JogType* this_p, const std::map<std::string, std::string> &cmd_params, PlanTarget &target, JogJParam &param, std::atomic_int32_t& j_count)->void
 	{
+		auto&cs = aris::server::ControlServer::instance();
 		auto c = target.controller;
 		param.p_now = 0.0;
 		param.v_now = 0.0;
@@ -1912,45 +3172,53 @@ namespace kaanh
 		param.increase_status = 0;
 		param.vel_percent = 0;
 
+		for (auto &p : cmd_params)
+		{
+			if (p.first == "increase_count")
+			{
+				param.increase_count = std::stoi(cmd_params.at("increase_count"));
+				if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
 
-		param.increase_count = std::stoi(cmd_params.at("increase_count"));
-		if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
+				param.vel = c->motionPool().at(param.motion_id).maxVel()*g_vel.getspeed().w_percent;
+				param.acc = std::min(std::max(std::stod(cmd_params.at("acc")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
+				param.dec = std::min(std::max(std::stod(cmd_params.at("dec")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
 
-		param.vel = c->motionPool().at(param.motion_id).maxVel()*g_vel.getspeed().w_percent;
-		param.acc = std::min(std::max(std::stod(cmd_params.at("acc")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
-		param.dec = std::min(std::max(std::stod(cmd_params.at("dec")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
+				auto velocity = std::stoi(cmd_params.at("vel_percent"));
+				velocity = std::max(std::min(100, velocity), 0);
+				param.vel_percent = velocity;
+				param.increase_status = std::max(std::min(1, std::stoi(cmd_params.at("direction"))), -1);
 
-		auto velocity = std::stoi(cmd_params.at("vel_percent"));
-		velocity = std::max(std::min(100, velocity), 0);
-		param.vel_percent = velocity;
-		param.increase_status = std::max(std::min(1, std::stoi(cmd_params.at("direction"))), -1);
+				std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
+				//当前有指令在执行//
+				if (planptr && planptr->plan != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+				if (j_count.exchange(param.increase_count))
+				{
+					target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
+				}
+				else
+				{
+					std::fill(target.mot_options.begin(), target.mot_options.end(), aris::plan::Plan::MotionOption::NOT_CHECK_POS_FOLLOWING_ERROR | aris::plan::Plan::MotionOption::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | aris::plan::Plan::MotionOption::USE_TARGET_POS | aris::plan::Plan::MotionOption::NOT_CHECK_ENABLE);
+					target.mot_options[param.motion_id] = aris::plan::Plan::MotionOption::NOT_CHECK_POS_FOLLOWING_ERROR | aris::plan::Plan::MotionOption::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | aris::plan::Plan::MotionOption::USE_TARGET_POS;
+				}
+			}
+			else if (p.first == "stop")
+			{
+				j_count.exchange(0);
+				target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
+			}
+		}
 	}
 	std::atomic_int32_t JogJParam::j1_count = 0;
 	auto JogJ1::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
-	{
-		auto&cs = aris::server::ControlServer::instance();
+	{	
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
 		param.motion_id = 0;
 
-		set_jogj_input_param(params, target, param);
+		set_jogj_input_param(this, params, target, param, param.j1_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.j1_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[0] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ1::executeRT(PlanTarget &target)->int
@@ -2046,14 +3314,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j1\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
@@ -2062,29 +3323,14 @@ namespace kaanh
 	std::atomic_int32_t JogJParam::j2_count = 0;
 	auto JogJ2::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
 		param.motion_id = 1;
-		set_jogj_input_param(params, target, param);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+		set_jogj_input_param(this, params, target, param, param.j2_count);
 
-		if (param.j2_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-			std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[1] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ2::executeRT(PlanTarget &target)->int
@@ -2180,14 +3426,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j2\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
@@ -2196,29 +3435,13 @@ namespace kaanh
 	std::atomic_int32_t JogJParam::j3_count = 0;
 	auto JogJ3::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
 		param.motion_id = 2;
-		set_jogj_input_param(params, target, param);
+		set_jogj_input_param(this, params, target, param, param.j3_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.j3_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-			std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[2] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ3::executeRT(PlanTarget &target)->int
@@ -2314,14 +3537,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j3\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
@@ -2330,29 +3546,13 @@ namespace kaanh
 	std::atomic_int32_t JogJParam::j4_count = 0;
 	auto JogJ4::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
     
 		param.motion_id = 3;
-		set_jogj_input_param(params, target, param);
+		set_jogj_input_param(this, params, target, param, param.j4_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.j4_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-			std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[3] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ4::executeRT(PlanTarget &target)->int
@@ -2448,14 +3648,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j4\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
@@ -2464,29 +3657,13 @@ namespace kaanh
 	std::atomic_int32_t JogJParam::j5_count = 0;
 	auto JogJ5::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
 		param.motion_id = 4;
-		set_jogj_input_param(params, target, param);
+		set_jogj_input_param(this, params, target, param, param.j5_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.j5_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-			std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[4] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ5::executeRT(PlanTarget &target)->int
@@ -2582,14 +3759,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j5\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
@@ -2598,29 +3768,13 @@ namespace kaanh
 	std::atomic_int32_t JogJParam::j6_count = 0;
 	auto JogJ6::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JogJParam param;
-
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
 		param.motion_id = 5;
-		set_jogj_input_param(params, target, param);
+		set_jogj_input_param(this, params, target, param, param.j6_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.j6_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-			std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS | NOT_CHECK_ENABLE);
-            target.mot_options[5] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS;
-		}
 		target.param = param;
 	}
 	auto JogJ6::executeRT(PlanTarget &target)->int
@@ -2716,18 +3870,26 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"j6\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
-			"		<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
-			"		<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
-			"		<Param name=\"vel_percent\" default=\"10\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGJ_PARAM_STRING
 			"</Command>");
 	}
 
 
+#define JOGC_PARAM_STRING \
+		"	<UniqueParam>"\
+		"		<GroupParam>"\
+		"			<Param name=\"increase_count\" default=\"500\"/>"\
+		"			<Param name=\"vel\" default=\"{0.05,0.05,0.05,0.25,0.25,0.25}\"/>"\
+		"			<Param name=\"acc\" default=\"{0.2,0.2,0.2,1,1,1}\"/>"\
+		"			<Param name=\"dec\" default=\"{0.2,0.2,0.2,1,1,1}\"/>"\
+		"			<Param name=\"cor\" default=\"0\"/>"\
+		"			<Param name=\"tool\" default=\"tool0\"/>"\
+		"			<Param name=\"wobj\" default=\"wobj0\"/>"\
+		"			<Param name=\"vel_percent\" default=\"20\"/>"\
+		"			<Param name=\"direction\" default=\"1\"/>"\
+		"		</GroupParam>"\
+		"		<Param name=\"stop\"/>"\
+		"	</UniqueParam>"
 	// 示教运动--jogx //
 	struct JCParam 
 	{
@@ -2741,41 +3903,70 @@ namespace kaanh
 		static std::atomic_int32_t jx_count, jy_count, jz_count, jrx_count, jry_count, jrz_count;
 		aris::dynamic::Marker *tool, *wobj;
 	};
-	auto set_jogc_input_param(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, JCParam &param)->void
+	template<typename JogType>
+	auto set_jogc_input_param(JogType* this_p, const std::map<std::string, std::string> &cmd_params, PlanTarget &target, JCParam &param, std::atomic_int32_t& j_count)->void
 	{
-		param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(cmd_params.at("tool"));
-		param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(cmd_params.at("wobj"));
+		auto&cs = aris::server::ControlServer::instance();
+		auto c = target.controller;
 
-		param.increase_count = std::stoi(cmd_params.at("increase_count"));
-		if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
+		for (auto &p : cmd_params)
+		{
+			if (p.first == "increase_count")
+			{
+				auto tool_is_string = cmd_params.at("tool");
+				auto wobj_is_string = cmd_params.at("wobj");
 
-		param.cor_system = std::stoi(cmd_params.at("cor"));
-		auto velocity = std::stoi(cmd_params.at("vel_percent"));
-		velocity = std::max(std::min(100, velocity), 0);
-		param.vel_percent = velocity;
+				param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(cmd_params.at("tool"));
+				param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(cmd_params.at("wobj"));
 
-		auto mat = target.model->calculator().calculateExpression(cmd_params.at("vel"));
-		if (mat.size() != 6)THROW_FILE_LINE("");
-		std::copy(mat.begin(), mat.end(), param.vel);
-		std::fill(param.vel, param.vel + 3, g_vel.getspeed().v_tcp);
-		std::fill(param.vel + 3, param.vel + 6, g_vel.getspeed().w_tcp);
+				param.increase_count = std::stoi(cmd_params.at("increase_count"));
+				if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
 
-		mat = target.model->calculator().calculateExpression(cmd_params.at("acc"));
-		if (mat.size() != 6)THROW_FILE_LINE("");
-		std::copy(mat.begin(), mat.end(), param.acc);
+				param.cor_system = std::stoi(cmd_params.at("cor"));
+				auto velocity = std::stoi(cmd_params.at("vel_percent"));
+				velocity = std::max(std::min(100, velocity), 0);
+				param.vel_percent = velocity;
 
-		mat = target.model->calculator().calculateExpression(cmd_params.at("dec"));
-		if (mat.size() != 6)THROW_FILE_LINE("");
-		std::copy(mat.begin(), mat.end(), param.dec);
+				auto mat = target.model->calculator().calculateExpression(cmd_params.at("vel"));
+				if (mat.size() != 6)THROW_FILE_LINE("");
+				std::copy(mat.begin(), mat.end(), param.vel);
+				std::fill(param.vel, param.vel + 3, g_vel.getspeed().v_tcp);
+				std::fill(param.vel + 3, param.vel + 6, g_vel.getspeed().w_tcp);
 
-		param.increase_status[param.moving_type] = std::max(std::min(1, std::stoi(cmd_params.at("direction"))), -1);
+				mat = target.model->calculator().calculateExpression(cmd_params.at("acc"));
+				if (mat.size() != 6)THROW_FILE_LINE("");
+				std::copy(mat.begin(), mat.end(), param.acc);
 
+				mat = target.model->calculator().calculateExpression(cmd_params.at("dec"));
+				if (mat.size() != 6)THROW_FILE_LINE("");
+				std::copy(mat.begin(), mat.end(), param.dec);
+
+				param.increase_status[param.moving_type] = std::max(std::min(1, std::stoi(cmd_params.at("direction"))), -1);
+
+				std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
+
+				//当前有指令在执行//
+				if (planptr && planptr->plan != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+
+				if (j_count.exchange(param.increase_count))
+				{
+					target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
+				}
+				else
+				{
+					std::fill(target.mot_options.begin(), target.mot_options.end(), aris::plan::Plan::MotionOption::NOT_CHECK_POS_FOLLOWING_ERROR | aris::plan::Plan::MotionOption::NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | aris::plan::Plan::MotionOption::USE_TARGET_POS);
+				}
+			}
+			else if (p.first == "stop")
+			{
+				j_count.exchange(0);
+				target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
+			}
+		}
 	}
 	std::atomic_int32_t JCParam::jx_count = 0;
 	auto JX::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -2784,21 +3975,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		set_jogc_input_param(params, target, param);
+		set_jogc_input_param(this, params, target, param, param.jx_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jx_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -2940,17 +4118,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jx\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.05,0.05,0.05,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"dec\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 	
@@ -2959,8 +4127,6 @@ namespace kaanh
 	std::atomic_int32_t JCParam::jy_count = 0;
 	auto JY::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -2969,20 +4135,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		set_jogc_input_param(params, target, param);
+		set_jogc_input_param(this, params, target, param, param.jy_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jy_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -3122,17 +4276,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jy\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.05,0.05,0.05,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"dec\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 
@@ -3141,8 +4285,6 @@ namespace kaanh
 	std::atomic_int32_t JCParam::jz_count = 0;
 	auto JZ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -3151,21 +4293,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		set_jogc_input_param(params, target, param);
+		set_jogc_input_param(this, params, target, param, param.jz_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jz_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -3305,17 +4434,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jz\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.05,0.05,0.05,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"dec\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 
@@ -3324,8 +4443,6 @@ namespace kaanh
 	std::atomic_int32_t JCParam::jrx_count = 0;
 	auto JRX::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -3334,21 +4451,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		set_jogc_input_param(params, target, param);
+		set_jogc_input_param(this, params, target, param, param.jrx_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jrx_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -3488,17 +4592,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jrx\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.05,0.05,0.05,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"dec\" default=\"{0.2,0.2,0.2,3,3,3}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 
@@ -3507,8 +4601,6 @@ namespace kaanh
 	std::atomic_int32_t JCParam::jry_count = 0;
 	auto JRY::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -3517,28 +4609,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		for (aris::Size i = 0; i < 6; i++)
-		{
-			param.vel[i] = c->motionPool().at(i).maxVel();
-			param.acc[i] = c->motionPool().at(i).maxAcc();
-			param.dec[i] = c->motionPool().at(i).maxAcc();
-		}
+		set_jogc_input_param(this, params, target, param, param.jry_count);
 
-		set_jogc_input_param(params, target, param);
-
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jry_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -3678,17 +4750,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jry\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.2,0.2,0.2,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{1,1,1,1,1,1}\"/>"
-			"		<Param name=\"dec\" default=\"{1,1,1,1,1,1}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 
@@ -3697,8 +4759,6 @@ namespace kaanh
 	std::atomic_int32_t JCParam::jrz_count = 0;
 	auto JRZ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
-		auto&cs = aris::server::ControlServer::instance();
-		auto c = target.controller;
 		JCParam param;
 
 		param.pm_target.resize(16, 0.0);
@@ -3707,21 +4767,8 @@ namespace kaanh
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 
-		set_jogc_input_param(params, target, param);
+		set_jogc_input_param(this, params, target, param, param.jrz_count);
 
-		std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
-
-		//当前有指令在执行//
-        if (planptr && planptr->plan != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
-
-		if (param.jrz_count.exchange(param.increase_count))
-		{
-			target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
-		}
-		else
-		{
-            std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | USE_TARGET_POS);
-		}
 		target.param = param;
 
 	}
@@ -3861,17 +4908,7 @@ namespace kaanh
 	{
 		command().loadXmlStr(
 			"<Command name=\"jrz\">"
-			"	<GroupParam>"
-            "		<Param name=\"increase_count\" default=\"100\"/>"
-			"		<Param name=\"vel\" default=\"{0.2,0.2,0.2,0.25,0.25,0.25}\"/>"
-			"		<Param name=\"acc\" default=\"{1,1,1,1,1,1}\"/>"
-			"		<Param name=\"dec\" default=\"{1,1,1,1,1,1}\"/>"
-			"		<Param name=\"cor\" default=\"0\"/>"
-			"		<Param name=\"tool\" default=\"tool0\"/>"
-			"		<Param name=\"wobj\" default=\"wobj0\"/>"
-			"		<Param name=\"vel_percent\" default=\"20\"/>"
-			"		<Param name=\"direction\" default=\"1\"/>"
-			"	</GroupParam>"
+				JOGC_PARAM_STRING
 			"</Command>");
 	}
 	
@@ -5030,7 +6067,6 @@ namespace kaanh
 		}
 		return true;
 	}
-	
 	auto onReceivedMsg(aris::core::Socket *socket, aris::core::Msg &msg)->int
 	{
 		std::string msg_data = msg.toString();
@@ -5141,7 +6177,7 @@ namespace kaanh
 					ret_pair.push_back(std::make_pair<std::string, std::any>("return_message", std::string(e.what())));
 					std::string ret_str = aris::server::parse_ret_value(ret_pair);
 
-					std::cout << ret_str << std::endl;
+					//std::cout << ret_str << std::endl;
 					LOG_ERROR << ret_str << std::endl;
 
 					try
@@ -5213,27 +6249,40 @@ namespace kaanh
 	}
 
 
+	// 停止指令 //
+	auto MoveSt::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		g_move_stop = true;
+		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
+	}
+	MoveSt::MoveSt(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"mvstop\">"
+			"</Command>");
+	}
+
     auto createPlanRootRokaeXB4()->std::unique_ptr<aris::plan::PlanRoot>
 	{
         std::unique_ptr<aris::plan::PlanRoot> plan_root(new aris::plan::PlanRoot);
 
-        plan_root->planPool().add<aris::plan::Enable>();
-        plan_root->planPool().add<aris::plan::Disable>();
-        plan_root->planPool().add<aris::plan::Home>();
-        plan_root->planPool().add<aris::plan::Mode>();
+        plan_root->planPool().add<kaanh::Enable>();
+        plan_root->planPool().add<kaanh::Disable>();
+        plan_root->planPool().add<kaanh::Home>();
+        plan_root->planPool().add<kaanh::Mode>();
         plan_root->planPool().add<aris::plan::Show>();
-        plan_root->planPool().add<aris::plan::Sleep>();
-        plan_root->planPool().add<aris::plan::Recover>();
-        auto &rs = plan_root->planPool().add<aris::plan::Reset>();
+        plan_root->planPool().add<kaanh::Sleep>();
+        plan_root->planPool().add<kaanh::Recover>();
+        auto &rs = plan_root->planPool().add<kaanh::Reset>();
         rs.command().findParam("pos")->setDefaultValue("{0.5,0.3925,0.7899,0.5,0.5,0.5}");
 		
         //qifan//
         //rs.command().findParam("pos")->setDefaultValue("{0.5,0.353,0.5,0.5,0.5,0.5}");
 
-        plan_root->planPool().add<aris::plan::MoveAbsJ>();
-
-        plan_root->planPool().add<aris::plan::MoveL>();
-        plan_root->planPool().add<aris::plan::MoveJ>();
+        plan_root->planPool().add<kaanh::MoveAbsJ>();
+        plan_root->planPool().add<kaanh::MoveL>();
+        plan_root->planPool().add<kaanh::MoveJ>();
+		plan_root->planPool().add<kaanh::MoveSt>();
 
         plan_root->planPool().add<aris::plan::GetXml>();
         plan_root->planPool().add<aris::plan::SetXml>();
