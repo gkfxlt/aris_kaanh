@@ -14,7 +14,8 @@ std::atomic_int g_vel_percent = 0;
 //global vel//
 
 //state machine flag//
-std::atomic_bool g_error = false;
+std::atomic_bool g_is_enabled = false;
+std::atomic_bool g_is_error = false;
 std::atomic_bool g_is_manual = false;
 std::atomic_bool g_is_auto = false;
 //state machine flag//
@@ -25,6 +26,7 @@ auto modelxmlpath = std::filesystem::absolute(".");
 const std::string xmlfile = "kaanh.xml";
 const std::string uixmlfile = "interface_kaanh.xml";
 const std::string modelxmlfile = "model_rokae.xml";
+
 
 int main(int argc, char *argv[])
 {
@@ -42,7 +44,7 @@ int main(int argc, char *argv[])
     cs.resetController(kaanh::createControllerRokaeXB4().release());
     //cs.resetModel(aris::robot::createModelRokaeXB4().release());
     cs.resetModel(kaanh::createModelRokae().release());
-    cs.resetPlanRoot(kaanh::createPlanRootRokaeXB4().release());
+    cs.resetPlanRoot(kaanh::createPlanRoot().release());
     //cs.interfacePool().add<aris::server::WebInterface>("", "5866", aris::core::Socket::WEB);
 	cs.interfacePool().add<kaanh::ProInterface>("", "5866", aris::core::Socket::WEB);
 	cs.interfacePool().add<aris::server::WebInterface>("", "5867", aris::core::Socket::TCP);
@@ -52,6 +54,12 @@ int main(int argc, char *argv[])
 	//cs.model().loadXmlFile(modelxmlpath.string().c_str());
 	cs.saveXmlFile(xmlpath.string().c_str());
     //-------for rokae robot end// 
+
+	
+	aris::core::Calculator c;
+	c.addVariable("tool.pq", aris::core::Matrix({1.0,2.0}));
+	auto ret_mat = c.calculateExpression("{tool.pq,0.3}*0.5 + 0.1");
+	std::cout << ret_mat.toString() << std::endl;
 	
 
     /*
@@ -100,8 +108,11 @@ int main(int argc, char *argv[])
 	*/
 	
 	cs.loadXmlFile(xmlpath.string().c_str());
-	
+
 	cs.start();
+
+	//实时回调函数，每个实时周期调用一次//
+	cs.setRtPlanPostCallback(kaanh::update_state);
 
 	//加载v100的速度值//
 	auto &getspeed = dynamic_cast<aris::dynamic::MatrixVariable &>(*cs.model().variablePool().findByName("v100"));
@@ -109,8 +120,6 @@ int main(int argc, char *argv[])
 	std::copy(getspeed.data().begin(), getspeed.data().end(), &speed.w_percent);
 	speed.w_tcp = speed.w_tcp * speed.w_percent;
 	g_vel.setspeed(speed);
-
-	std::cout << "w_percent:" << g_vel.getspeed().w_percent << std::endl;
 
 	//Start Web Socket//
     cs.open();

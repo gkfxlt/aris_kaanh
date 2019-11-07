@@ -9,6 +9,7 @@
 #include <string>
 #include"robotplan.h"
 #include"planfuns.h"
+#include <bitset>
 
 
 using namespace aris::dynamic;
@@ -20,7 +21,8 @@ extern std::atomic_int g_vel_percent;
 //global vel//
 
 //state machine flag//
-extern std::atomic_bool g_error;
+extern std::atomic_bool g_is_enabled;
+extern std::atomic_bool g_is_error;
 extern std::atomic_bool g_is_manual;
 extern std::atomic_bool g_is_auto;
 //state machine flag//
@@ -120,6 +122,54 @@ namespace kaanh
         dynamic_cast<aris::control::EthercatSlave&>(controller->slavePool().back()).scanPdoForCurrentSlave();
         dynamic_cast<aris::control::EthercatSlave&>(controller->slavePool().back()).setDcAssignActivate(0x00);
 #endif
+
+#ifdef WIN32
+		double pos_offset = 0.0 / 8388608.0 * 250;	//在零位时，为500count
+		double pos_factor = 8388608.0 * 250;	//运行1m需要转250转
+		double max_pos = 10.0;
+		double min_pos = 0.0;
+		double max_vel = 1.0;	//1m/s
+		double max_acc = 5.0;	//5m/s2
+
+		std::string xml_str =
+			"<EthercatMotion phy_id=\"" + std::to_string(6) + "\" product_code=\"0x6038000D\""
+			" vendor_id=\"0x0000066F\" revision_num=\"0x00010000\" dc_assign_activate=\"0x0300\""
+			" min_pos=\"" + std::to_string(min_pos) + "\" max_pos=\"" + std::to_string(max_pos) + "\" max_vel=\"" + std::to_string(max_vel) + "\" min_vel=\"" + std::to_string(-max_vel) + "\""
+			" max_acc=\"" + std::to_string(max_acc) + "\" min_acc=\"" + std::to_string(-max_acc) + "\" max_pos_following_error=\"0.1\" max_vel_following_error=\"0.5\""
+			" home_pos=\"0\" pos_factor=\"" + std::to_string(pos_factor) + "\" pos_offset=\"" + std::to_string(pos_offset) + "\">"
+			"	<SyncManagerPoolObject>"
+			"		<SyncManager is_tx=\"false\"/>"
+			"		<SyncManager is_tx=\"true\"/>"
+			"		<SyncManager is_tx=\"false\">"
+			"			<Pdo index=\"0x1600\" is_tx=\"false\">"
+			"				<PdoEntry name=\"control_word\" index=\"0x6040\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"mode_of_operation\" index=\"0x6060\" subindex=\"0x00\" size=\"8\"/>"
+			"				<PdoEntry name=\"target_pos\" index=\"0x607A\" subindex=\"0x00\" size=\"32\"/>"
+			"				<PdoEntry name=\"touch_probe\" index=\"0x60B8\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"targer_tor\" index=\"0x6071\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"offset_tor\" index=\"0x60B2\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"offset_vel\" index=\"0x60B1\" subindex=\"0x00\" size=\"32\"/>"
+			"			</Pdo>"
+			"		</SyncManager>"
+			"		<SyncManager is_tx=\"true\">"
+			"			<Pdo index=\"0x1a01\" is_tx=\"true\">"
+			"				<PdoEntry name=\"error_code\" index=\"0x603F\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"status_word\" index=\"0x6041\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"mode_of_display\" index=\"0x6061\" subindex=\"0x00\" size=\"8\"/>"
+			"				<PdoEntry name=\"pos_actual_value\" index=\"0x6064\" subindex=\"0x00\" size=\"32\"/>"
+			"				<PdoEntry name=\"vel_actual_value\" index=\"0x606C\" subindex=\"0x00\" size=\"32\"/>"
+			"				<PdoEntry name=\"cur_actual_value\" index=\"0x6077\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"touch_probe_status\" index=\"0x60b9\" subindex=\"0x00\" size=\"16\"/>"
+			"				<PdoEntry name=\"touch_probe_pos1\" index=\"0x60ba\" subindex=\"0x00\" size=\"32\"/>"
+			"				<PdoEntry name=\"digital_input\" index=\"0x60fd\" subindex=\"0x00\" size=\"32\"/>"
+			"			</Pdo>"
+			"		</SyncManager>"
+			"	</SyncManagerPoolObject>"
+			"</EthercatMotion>";
+
+		controller->slavePool().add<aris::control::EthercatMotion>().loadXmlStr(xml_str);
+#endif // WIN32
+
 		return controller;
 	};
 	auto createModelRokaeXB4(const double *robot_pm)->std::unique_ptr<aris::dynamic::Model>
@@ -728,6 +778,77 @@ namespace kaanh
 		return std::move(model);
 	}
 
+	//更新实时状态：使能、报错//
+	auto update_state(aris::server::ControlServer &cs)->void
+	{
+		static bool motion_state[6] = { false, false, false, false, false, false };
+		
+		//获取motion的使能状态，0表示去使能状态，1表示使能状态//
+		for (aris::Size i = 0; i < 6; i++)
+		{
+			auto cm = dynamic_cast<aris::control::EthercatMotion*>(&cs.controller().motionPool()[i]);
+			if ((cm->statusWord() & 0x6f) != 0x27)
+			{
+				motion_state[i] = 0;
+			}
+			else
+			{
+				motion_state[i] = 1;
+			}
+			//motion_state[i] = 1;
+		}
+		
+		//获取ret_code的值，判断是否报错，if条件可以初始化变量，并且取变量进行条件判断//
+		if (auto target = cs.currentExecuteTargetRt(); target)
+		{
+			g_is_error.store(target->ret_code);
+		}
+		
+		if (motion_state[0] && motion_state[1] && motion_state[2] && motion_state[3] && motion_state[4] && motion_state[5])
+		{
+			g_is_enabled.store(true);
+		}
+		else
+		{
+			g_is_enabled.store(false);
+		}
+		
+	}
+
+	//获取状态字——100:去使能,200:手动,300:准自动,400:自动,500:错误//
+	auto get_state_code()->std::int32_t
+	{
+		if (g_is_enabled.load())
+		{
+			if (g_is_error.load())
+			{
+				return 500;
+			}
+			else
+			{
+				if (g_is_manual.load())
+				{
+					return 200;
+				}
+				else
+				{
+					if (!g_is_auto.load())
+					{
+						return 300;
+					}
+					else
+					{
+						return 400;
+					}
+				}
+			}
+		}
+		else
+		{
+			return 100;
+		}
+	}
+
 
 #define CHECK_PARAM_STRING \
 		"		<UniqueParam default=\"check_all\">" \
@@ -978,6 +1099,7 @@ namespace kaanh
 		std::vector<double> axis_vel_vec;
 		std::vector<double> axis_acc_vec;
 		std::vector<double> axis_dec_vec;
+		std::vector<double> axis_jerk_vec;
 	};
 #define SET_INPUT_MOVEMENT_STRING \
 		"		<Param name=\"pos\" default=\"0.5\"/>"\
@@ -1057,6 +1179,23 @@ namespace kaanh
 					THROW_FILE_LINE("");
 				}
 			}
+			else if (cmd_param.first == "jerk")
+			{
+				auto d = target.model->calculator().calculateExpression(cmd_param.second);
+
+				if (d.size() == 1)
+				{
+					param.axis_jerk_vec.resize(target.controller->motionPool().size(), d.toDouble());
+				}
+				else if (d.size() == target.controller->motionPool().size())
+				{
+					param.axis_jerk_vec.assign(d.begin(), d.end());
+				}
+				else
+				{
+					THROW_FILE_LINE("");
+				}
+			}
 		}
 	}
 	auto check_input_movement(const std::map<std::string, std::string> &cmd_params, PlanTarget &target, SetInputMovement &param, SetActiveMotor &active)->void
@@ -1077,6 +1216,9 @@ namespace kaanh
 
 				if (param.axis_dec_vec[i] > c->motionPool()[i].maxAcc() || param.axis_dec_vec[i] <= 0.0)
 					THROW_FILE_LINE("input dec beyond range");
+
+				if (param.axis_jerk_vec[i] > 1000*c->motionPool()[i].maxAcc() || param.axis_jerk_vec[i] <= 0.0)
+					THROW_FILE_LINE("input dec beyond range");
 			}
 		}
 	}
@@ -1095,15 +1237,15 @@ namespace kaanh
 		int vel_percent;
 	};
 	auto Get::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
-	{
+	{		
 		GetParam par;
 		par.part_pq.resize(target.model->partPool().size() * 7, 0.0);
 		par.end_pq.resize(7, 0.0);
 		par.end_pe.resize(6, 0.0);
-		par.motion_pos.resize(6, 0.0);
-		par.motion_vel.resize(6, 0.0);
-		par.motion_acc.resize(6, 0.0);
-		par.motion_toq.resize(6, 0.0);
+		par.motion_pos.resize(7, 0.0);
+		par.motion_vel.resize(7, 0.0);
+		par.motion_acc.resize(7, 0.0);
+		par.motion_toq.resize(7, 0.0);
 		par.ai.resize(100, 1.0);
 		par.di.resize(100, false);
 		par.motion_state.resize(6, 0);
@@ -1120,7 +1262,7 @@ namespace kaanh
 			cs.model().generalMotionPool().at(0).getMpq(std::any_cast<GetParam &>(data).end_pq.data());
 			cs.model().generalMotionPool().at(0).getMpe(std::any_cast<GetParam &>(data).end_pe.data(), "321");
 
-			for (aris::Size i = 0; i < cs.controller().motionPool().size(); i++)
+			for (aris::Size i = 0; i < 6; i++)
 			{
 #ifdef WIN32
 				std::any_cast<GetParam &>(data).motion_pos[i] = cs.model().motionPool()[i].mp();
@@ -1136,12 +1278,16 @@ namespace kaanh
 				std::any_cast<GetParam &>(data).motion_toq[i] = cs.controller().motionPool()[i].actualToq();
 #endif // UNIX
 			}
+			std::any_cast<GetParam &>(data).motion_pos[6] = cs.controller().motionPool()[6].actualPos();
+			std::any_cast<GetParam &>(data).motion_vel[6] = cs.controller().motionPool()[6].actualVel();
+			std::any_cast<GetParam &>(data).motion_acc[6] = 0;
+			std::any_cast<GetParam &>(data).motion_toq[6] = cs.controller().motionPool()[6].actualToq();
+
 			for (aris::Size i = 0; i < 100; i++)
 			{
 				std::any_cast<GetParam &>(data).ai[i] = 1.0;
 				std::any_cast<GetParam &>(data).di[i] = false;
 			}
-			std::any_cast<GetParam &>(data).state_code = 0;
 			
 			auto ec = dynamic_cast<aris::control::EthercatController*>(&cs.controller());
 			ec->getLinkState(&std::any_cast<GetParam &>(data).mls, std::any_cast<GetParam &>(data).sls);
@@ -1159,6 +1305,7 @@ namespace kaanh
 					std::any_cast<GetParam &>(data).motion_state[i] = 1;
 				}
 			}
+			
 			if (target == nullptr)
 			{
 				std::any_cast<GetParam &>(data).currentplan = "none";
@@ -1177,6 +1324,7 @@ namespace kaanh
 			slave_online[i] = int(out_data.sls[i].online);
 			slave_al_state[i] = int(out_data.sls[i].al_state);
 		}
+		out_data.state_code = get_state_code();
 
 		std::vector<std::pair<std::string, std::any>> out_param;
 		out_param.push_back(std::make_pair<std::string, std::any>("part_pq", out_data.part_pq));
@@ -1671,6 +1819,7 @@ namespace kaanh
 	struct MoveAbsJParam :public SetActiveMotor, SetInputMovement {};
 	auto MoveAbsJ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
+		std::cout << "mvaj:" << std::endl;
 		MoveAbsJParam param;
 
 		set_check_option(params, target);
@@ -1680,6 +1829,7 @@ namespace kaanh
 
 		param.axis_begin_pos_vec.resize(target.controller->motionPool().size());
 		target.param = param;
+		//std::fill(target.mot_options.begin(), target.mot_options.end(), Plan::USE_TARGET_POS);
 		for (auto &option : target.mot_options) option |= aris::plan::Plan::NOT_CHECK_ENABLE;
 
 		std::vector<std::pair<std::string, std::any>> ret_value;
@@ -1687,6 +1837,7 @@ namespace kaanh
 	}
 	auto MoveAbsJ::executeRT(PlanTarget &target)->int
 	{
+		auto controller = target.controller;
 		auto param = std::any_cast<MoveAbsJParam>(&target.param);
 
 		if (target.count == 1)
@@ -1696,6 +1847,7 @@ namespace kaanh
 				if (param->active_motor[i])
 				{
 					param->axis_begin_pos_vec[i] = target.controller->motionPool()[i].targetPos();
+					//param->axis_begin_pos_vec[i] = target.model->motionPool()[i].mp();
 				}
 			}
 		}
@@ -1705,24 +1857,39 @@ namespace kaanh
 		{
 			if (param->active_motor[i])
 			{
-				double p, v, a;
+				double p, v, a, j;
 				aris::Size t_count;
-				aris::plan::moveAbsolute(target.count,
-					param->axis_begin_pos_vec[i], param->axis_pos_vec[i],
-					param->axis_vel_vec[i] / 1000, param->axis_acc_vec[i] / 1000 / 1000, param->axis_dec_vec[i] / 1000 / 1000,
-					p, v, a, t_count);
+				//aris::plan::moveAbsolute(target.count,
+				//	param->axis_begin_pos_vec[i], param->axis_pos_vec[i],
+				//	param->axis_vel_vec[i] / 1000, param->axis_acc_vec[i] / 1000 / 1000, param->axis_dec_vec[i] / 1000 / 1000,
+				//	p, v, a, t_count);
+				
+				//s形规划//
+				traplan::sCurve(target.count, param->axis_begin_pos_vec[i], param->axis_pos_vec[i],
+					param->axis_vel_vec[i] / 1000, param->axis_acc_vec[i] / 1000 / 1000, param->axis_jerk_vec[i] / 1000 / 1000 / 1000,
+					p, v, a, j, t_count);
 				target.controller->motionPool()[i].setTargetPos(p);
+				target.model->motionPool()[i].setMp(p);
 				total_count = std::max(total_count, t_count);
+
+				// log //
+				auto &lout = controller->lout();
+				lout << p << " ";
+				lout << v << " ";
+				lout << a << " ";
+				lout << j << " ";	
+				lout << std::endl;
 			}
 		}
+		if (target.model->solverPool().at(1).kinPos())return -1;
 
 		if (g_move_stop)
 		{
 			return -4;
 		}
+
 		return total_count - target.count;
 	}
-	struct MoveAbsJ::Imp {};
 	MoveAbsJ::~MoveAbsJ() = default;
 	MoveAbsJ::MoveAbsJ(const std::string &name) : Plan(name)
 	{
@@ -1733,12 +1900,13 @@ namespace kaanh
 			"		<Param name=\"vel\" default=\"1.0\"/>"
 			"		<Param name=\"acc\" default=\"1.0\"/>"
 			"		<Param name=\"dec\" default=\"1.0\"/>"
+			"		<Param name=\"jerk\" default=\"10.0\"/>"
 			SELECT_MOTOR_STRING
 			CHECK_PARAM_STRING
 			"	</GroupParam>"
 			"</Command>");
 	}
-	ARIS_DEFINE_BIG_FOUR_CPP(MoveAbsJ);
+
 
 	auto check_eul_validity(const std::string &eul_type)->bool
 	{
@@ -1806,8 +1974,9 @@ namespace kaanh
 	}
 	struct MoveJParam
 	{
-		std::vector<double> joint_vel, joint_acc, joint_dec, ee_pq, joint_pos_begin, joint_pos_end;
+		std::vector<double> joint_vel, joint_acc, joint_dec, joint_jerk, ee_pq, joint_pos_begin, joint_pos_end;
 		std::vector<Size> total_count;
+		aris::dynamic::Marker *tool, *wobj;
 	};
 	struct MoveJ::Imp {};
 	auto MoveJ::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
@@ -1824,6 +1993,12 @@ namespace kaanh
 		mvj_param.joint_pos_end.resize(target.model->motionPool().size(), 0.0);
 		mvj_param.total_count.resize(target.model->motionPool().size(), 0);
 
+		auto tool_is_string = params.at("tool");
+		auto wobj_is_string = params.at("wobj");
+
+		mvj_param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(params.at("tool"));
+		mvj_param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(params.at("wobj"));
+		
 		// find joint acc/vel/dec/
 		for (auto cmd_param : params)
 		{
@@ -1879,6 +2054,23 @@ namespace kaanh
 					if (mvj_param.joint_dec[i] <= 0 || mvj_param.joint_dec[i] > c->motionPool()[i].maxAcc())
 						THROW_FILE_LINE("");
 			}
+			else if (cmd_param.first == "joint_jerk")
+			{
+				mvj_param.joint_jerk.clear();
+				mvj_param.joint_jerk.resize(target.model->motionPool().size(), 0.0);
+
+				auto dec_mat = target.model->calculator().calculateExpression(cmd_param.second);
+				if (dec_mat.size() == 1)std::fill(mvj_param.joint_jerk.begin(), mvj_param.joint_jerk.end(), dec_mat.toDouble());
+				else if (dec_mat.size() == target.model->motionPool().size()) std::copy(dec_mat.begin(), dec_mat.end(), mvj_param.joint_jerk.begin());
+				else THROW_FILE_LINE("");
+
+				for (int i = 0; i < 6; ++i) mvj_param.joint_jerk[i] *= mvj_param.joint_acc[i];
+
+				// check value validity //
+				for (Size i = 0; i < std::min(target.model->motionPool().size(), c->motionPool().size()); ++i)
+					if (mvj_param.joint_jerk[i] <= 0 || mvj_param.joint_jerk[i] > 1000*c->motionPool()[i].maxAcc())
+						THROW_FILE_LINE("");
+			}
 		}
 
 		target.param = mvj_param;
@@ -1892,14 +2084,17 @@ namespace kaanh
 		auto controller = target.controller;
 
 		// 取得起始位置 //
-		double p, v, a;
+		double p, v, a, j;
 		static Size max_total_count;
 		if (target.count == 1)
 		{
 			// inverse kinematic //
 			double end_pm[16];
 			aris::dynamic::s_pq2pm(mvj_param->ee_pq.data(), end_pm);
-			target.model->generalMotionPool().at(0).setMpm(end_pm);
+			//target.model->generalMotionPool().at(0).setMpm(end_pm);
+			mvj_param->tool->setPm(*mvj_param->wobj, end_pm);
+			target.model->generalMotionPool().at(0).updMpm();
+
 			if (target.model->solverPool().at(0).kinPos())return -1;
 
 			// init joint_pos //
@@ -1907,9 +2102,15 @@ namespace kaanh
 			{
 				mvj_param->joint_pos_begin[i] = controller->motionPool()[i].targetPos();
 				mvj_param->joint_pos_end[i] = target.model->motionPool()[i].mp();
-				aris::plan::moveAbsolute(target.count, mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i]
-					, mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000
-					, p, v, a, mvj_param->total_count[i]);
+				//梯形轨迹规划//
+				//aris::plan::moveAbsolute(target.count, mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i]
+				//	, mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000
+				//	, p, v, a, mvj_param->total_count[i]);
+
+				//S形轨迹规划//
+				traplan::sCurve(target.count, mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i],
+					mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_jerk[i] / 1000 / 1000 / 1000,
+					p, v, a, j, mvj_param->total_count[i]);
 			}
 
 			max_total_count = *std::max_element(mvj_param->total_count.begin(), mvj_param->total_count.end());
@@ -1917,10 +2118,17 @@ namespace kaanh
 
 		for (Size i = 0; i < std::min(controller->motionPool().size(), target.model->motionPool().size()); ++i)
 		{
-			aris::plan::moveAbsolute(static_cast<double>(target.count) * mvj_param->total_count[i] / max_total_count,
+			//梯形轨迹规划//
+			//aris::plan::moveAbsolute(static_cast<double>(target.count) * mvj_param->total_count[i] / max_total_count,
+			//	mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i],
+			//	mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000,
+			//	p, v, a, mvj_param->total_count[i]);
+
+			//S形轨迹规划//
+			traplan::sCurve(static_cast<double>(target.count) * mvj_param->total_count[i] / max_total_count,
 				mvj_param->joint_pos_begin[i], mvj_param->joint_pos_end[i],
-				mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_dec[i] / 1000 / 1000,
-				p, v, a, mvj_param->total_count[i]);
+				mvj_param->joint_vel[i] / 1000, mvj_param->joint_acc[i] / 1000 / 1000, mvj_param->joint_jerk[i] / 1000 / 1000 / 1000,
+				p, v, a, j, mvj_param->total_count[i]);
 
 			controller->motionPool()[i].setTargetPos(p);
 			target.model->motionPool()[i].setMp(p);
@@ -1952,6 +2160,9 @@ namespace kaanh
 			"		<Param name=\"joint_acc\" default=\"0.1\"/>"
 			"		<Param name=\"joint_vel\" default=\"0.1\"/>"
 			"		<Param name=\"joint_dec\" default=\"0.1\"/>"
+			"		<Param name=\"joint_jerk\" default=\"10.0\"/>"
+			"		<Param name=\"tool\" default=\"tool0\"/>"
+			"		<Param name=\"wobj\" default=\"wobj0\"/>"
 			CHECK_PARAM_STRING
 			"	</GroupParam>"
 			"</Command>");
@@ -1960,11 +2171,12 @@ namespace kaanh
 
 	struct MoveLParam
 	{
-		std::vector<double> joint_vel, joint_acc, joint_dec, ee_pq, joint_pos_begin, joint_pos_end;
+		std::vector<double> joint_vel, joint_acc, joint_dec, joint_jerk, ee_pq, joint_pos_begin, joint_pos_end;
 		Size total_count[6];
 
-		double acc, vel, dec;
-		double angular_acc, angular_vel, angular_dec;
+		double acc, vel, dec, jerk;
+		double angular_acc, angular_vel, angular_dec, angular_jerk;
+		aris::dynamic::Marker *tool, *wobj;
 	};
 	struct MoveL::Imp {};
 	auto MoveL::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
@@ -1974,6 +2186,12 @@ namespace kaanh
 		MoveLParam mvl_param;
 		mvl_param.ee_pq.resize(7);
 		if (!find_pq(params, target, mvl_param.ee_pq.data()))THROW_FILE_LINE("");
+
+		auto tool_is_string = params.at("tool");
+		auto wobj_is_string = params.at("wobj");
+
+		mvl_param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(params.at("tool"));
+		mvl_param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(params.at("wobj"));
 
 		for (auto cmd_param : params)
 		{
@@ -1989,6 +2207,10 @@ namespace kaanh
 			{
 				mvl_param.dec = std::stod(cmd_param.second);
 			}
+			else if (cmd_param.first == "jerk")
+			{
+				mvl_param.jerk = std::stod(cmd_param.second)*mvl_param.acc;
+			}
 			else if (cmd_param.first == "angular_acc")
 			{
 				mvl_param.angular_acc = std::stod(cmd_param.second);
@@ -2000,6 +2222,10 @@ namespace kaanh
 			else if (cmd_param.first == "angular_dec")
 			{
 				mvl_param.angular_dec = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "angular_jerk")
+			{
+				mvl_param.angular_jerk = std::stod(cmd_param.second)*mvl_param.angular_acc;
 			}
 		}
 
@@ -2016,15 +2242,17 @@ namespace kaanh
 
 		// 取得起始位置 //
 		static double begin_pm[16], relative_pm[16], relative_pa[6], pos_ratio, ori_ratio, norm_pos, norm_ori;
-		double p, v, a;
+		double p, v, a, j;
 		aris::Size pos_total_count, ori_total_count;
 		if (target.count == 1)
 		{
 			double end_pm[16];
 			aris::dynamic::s_pq2pm(mvl_param->ee_pq.data(), end_pm);
 			target.model->generalMotionPool().at(0).updMpm();
-			target.model->generalMotionPool().at(0).getMpm(begin_pm);
+			//target.model->generalMotionPool().at(0).getMpm(begin_pm);
+			mvl_param->tool->getPm(*mvl_param->wobj, begin_pm);
 			aris::dynamic::s_inv_pm_dot_pm(begin_pm, end_pm, relative_pm);
+
 
 			// relative_pa //
 			aris::dynamic::s_pm2pa(relative_pm, relative_pa);
@@ -2032,29 +2260,40 @@ namespace kaanh
 			norm_pos = aris::dynamic::s_norm(3, relative_pa);
 			norm_ori = aris::dynamic::s_norm(3, relative_pa + 3);
 
-			aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->dec / 1000 / 1000, p, v, a, pos_total_count);
-			aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_dec / 1000 / 1000, p, v, a, ori_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->dec / 1000 / 1000, p, v, a, pos_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_dec / 1000 / 1000, p, v, a, ori_total_count);
+
+			traplan::sCurve(target.count, 0.0, norm_pos, mvl_param->vel / 1000, mvl_param->acc / 1000 / 1000, mvl_param->jerk / 1000 / 1000 / 1000, p, v, a, j, pos_total_count);
+			traplan::sCurve(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000, mvl_param->angular_acc / 1000 / 1000, mvl_param->angular_jerk / 1000 / 1000 / 1000, p, v, a, j, ori_total_count);
 
 			pos_ratio = pos_total_count < ori_total_count ? double(pos_total_count) / ori_total_count : 1.0;
 			ori_ratio = ori_total_count < pos_total_count ? double(ori_total_count) / pos_total_count : 1.0;
 
-			aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
-			aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		
+			traplan::sCurve(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio * pos_ratio, mvl_param->jerk / 1000 / 1000 / 1000 * pos_ratio* pos_ratio* pos_ratio, p, v, a, j, pos_total_count);
+			traplan::sCurve(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_jerk / 1000 / 1000 / 1000 * ori_ratio * ori_ratio* ori_ratio, p, v, a, j, ori_total_count);
+		
 		}
 
 		double pa[6]{ 0,0,0,0,0,0 }, pm[16], pm2[16];
 
-		aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+		//aris::plan::moveAbsolute(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->dec / 1000 / 1000 * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+		traplan::sCurve(target.count, 0.0, norm_pos, mvl_param->vel / 1000 * pos_ratio, mvl_param->acc / 1000 / 1000 * pos_ratio* pos_ratio, mvl_param->jerk / 1000 / 1000 /1000 * pos_ratio* pos_ratio* pos_ratio, p, v, a, j, pos_total_count);
 		if (norm_pos > 1e-10)aris::dynamic::s_vc(3, p / norm_pos, relative_pa, pa);
 
-		aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		//aris::plan::moveAbsolute(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_dec / 1000 / 1000 * ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		traplan::sCurve(target.count, 0.0, norm_ori, mvl_param->angular_vel / 1000 * ori_ratio, mvl_param->angular_acc / 1000 / 1000 * ori_ratio * ori_ratio, mvl_param->angular_jerk / 1000 / 1000 /1000 * ori_ratio * ori_ratio * ori_ratio, p, v, a, j, ori_total_count);
 		if (norm_ori > 1e-10)aris::dynamic::s_vc(3, p / norm_ori, relative_pa + 3, pa + 3);
 
 		aris::dynamic::s_pa2pm(pa, pm);
 		aris::dynamic::s_pm_dot_pm(begin_pm, pm, pm2);
 
 		// 反解计算电机位置 //
-		target.model->generalMotionPool().at(0).setMpm(pm2);
+		//target.model->generalMotionPool().at(0).setMpm(pm2);
+		mvl_param->tool->setPm(*mvl_param->wobj, pm2);
+		target.model->generalMotionPool().at(0).updMpm();
 		if (target.model->solverPool().at(0).kinPos())return -1;
 
 		////////////////////////////////////// log ///////////////////////////////////////
@@ -2094,9 +2333,13 @@ namespace kaanh
 			"		<Param name=\"acc\" default=\"0.1\"/>"
 			"		<Param name=\"vel\" default=\"0.1\"/>"
 			"		<Param name=\"dec\" default=\"0.1\"/>"
+			"		<Param name=\"jerk\" default=\"10.0\"/>"
 			"		<Param name=\"angular_acc\" default=\"0.1\"/>"
 			"		<Param name=\"angular_vel\" default=\"0.1\"/>"
 			"		<Param name=\"angular_dec\" default=\"0.1\"/>"
+			"		<Param name=\"angular_jerk\" default=\"10.0\"/>"
+			"		<Param name=\"tool\" default=\"tool0\"/>"
+			"		<Param name=\"wobj\" default=\"wobj0\"/>"
 			CHECK_PARAM_STRING
 			"	</GroupParam>"
 			"</Command>");
@@ -2255,8 +2498,9 @@ namespace kaanh
 	{
 		std::vector<double> joint_vel, joint_acc, joint_dec, ee_begin_pq, ee_mid_pq, ee_end_pq, joint_pos_begin, joint_pos_end;
 		Size total_count[6];
-		double acc, vel, dec;
-		double angular_acc, angular_vel, angular_dec;
+		double acc, vel, dec, jerk;
+		double angular_acc, angular_vel, angular_dec, angular_jerk;
+		aris::dynamic::Marker *tool, *wobj;
 	};
 	struct MoveC::Imp {};
 	auto MoveC::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
@@ -2267,6 +2511,12 @@ namespace kaanh
 		mvc_param.ee_end_pq.resize(7);
 		if (!find_mid_pq(params, target, mvc_param.ee_mid_pq.data()))THROW_FILE_LINE("");
 		if (!find_end_pq(params, target, mvc_param.ee_end_pq.data()))THROW_FILE_LINE("");
+
+		auto tool_is_string = params.at("tool");
+		auto wobj_is_string = params.at("wobj");
+
+		mvc_param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(params.at("tool"));
+		mvc_param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(params.at("wobj"));
 
 		for (auto cmd_param : params)
 		{
@@ -2282,6 +2532,10 @@ namespace kaanh
 			{
 				mvc_param.dec = std::stod(cmd_param.second);
 			}
+			else if (cmd_param.first == "jerk")
+			{
+				mvc_param.jerk = std::stod(cmd_param.second);
+			}
 			else if (cmd_param.first == "angular_acc")
 			{
 				mvc_param.angular_acc = std::stod(cmd_param.second);
@@ -2293,6 +2547,10 @@ namespace kaanh
 			else if (cmd_param.first == "angular_dec")
 			{
 				mvc_param.angular_dec = std::stod(cmd_param.second);
+			}
+			else if (cmd_param.first == "angular_jerk")
+			{
+				mvc_param.angular_jerk = std::stod(cmd_param.second);
 			}
 		}
 
@@ -2311,12 +2569,13 @@ namespace kaanh
 		// 取得起始位置 //
 		static double pos_ratio, ori_ratio;
 		static double A[9], b[3], C[3], R, theta, ori_theta;
-		double p, v, a;
+		double p, v, a, j;
 		aris::Size pos_total_count, ori_total_count;
 
 		if (target.count == 1)
 		{
-			target.model->generalMotionPool().at(0).getMpq(mvc_param.ee_begin_pq.data());
+			//target.model->generalMotionPool().at(0).getMpq(mvc_param.ee_begin_pq.data());
+			mvc_param.tool->getPq(*mvc_param.wobj, mvc_param.ee_begin_pq.data());
 
 			//排除3点共线的情况//		
 			std::vector<double> mul_cross(3);
@@ -2390,8 +2649,11 @@ namespace kaanh
 
 			ori_theta = std::abs((mvc_param.ee_begin_pq[3] * mvc_param.ee_end_pq[3] + mvc_param.ee_begin_pq[4] * mvc_param.ee_end_pq[4] + mvc_param.ee_begin_pq[5] * mvc_param.ee_end_pq[5] + mvc_param.ee_begin_pq[6] * mvc_param.ee_end_pq[6])/ (normv_begin_pq* normv_end_pq));
 
-			aris::plan::moveAbsolute(target.count, 0.0, theta, mvc_param.vel / 1000 / R, mvc_param.acc / 1000 / 1000 / R, mvc_param.dec / 1000 / 1000 / R, p, v, a, pos_total_count);
-			aris::plan::moveAbsolute(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0, mvc_param.angular_dec / 1000 / 1000 / ori_theta / 2.0, p, v, a, ori_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, theta, mvc_param.vel / 1000 / R, mvc_param.acc / 1000 / 1000 / R, mvc_param.dec / 1000 / 1000 / R, p, v, a, pos_total_count);
+			//aris::plan::moveAbsolute(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0, mvc_param.angular_dec / 1000 / 1000 / ori_theta / 2.0, p, v, a, ori_total_count);
+
+			traplan::sCurve(target.count, 0.0, theta, mvc_param.vel / 1000 / R, mvc_param.acc / 1000 / 1000 / R, mvc_param.jerk / 1000 / 1000 /1000 / R, p, v, a, j, pos_total_count);
+			traplan::sCurve(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0, mvc_param.angular_jerk / 1000 / 1000 /1000 / ori_theta / 2.0, p, v, a, j, ori_total_count);
 
 			pos_ratio = pos_total_count < ori_total_count ? double(pos_total_count) / ori_total_count : 1.0;
 			ori_ratio = ori_total_count < pos_total_count ? double(ori_total_count) / pos_total_count : 1.0;
@@ -2402,15 +2664,17 @@ namespace kaanh
 		aris::dynamic::s_vc(3, A + 6, w);
 		auto normv = aris::dynamic::s_norm(3, w);
 		if (std::abs(normv) > 1e-10)aris::dynamic::s_nv(3, 1 / normv, w); //数乘
-		aris::plan::moveAbsolute(target.count, 0.0, theta, mvc_param.vel / 1000 / R * pos_ratio, mvc_param.acc / 1000 / 1000 / R * pos_ratio * pos_ratio, mvc_param.dec / 1000 / 1000 / R * pos_ratio* pos_ratio, p, v, a, pos_total_count);
-		
+		//aris::plan::moveAbsolute(target.count, 0.0, theta, mvc_param.vel / 1000 / R * pos_ratio, mvc_param.acc / 1000 / 1000 / R * pos_ratio * pos_ratio, mvc_param.dec / 1000 / 1000 / R * pos_ratio* pos_ratio, p, v, a, pos_total_count);
+		traplan::sCurve(target.count, 0.0, theta, mvc_param.vel / 1000 / R * pos_ratio, mvc_param.acc / 1000 / 1000 / R * pos_ratio * pos_ratio, mvc_param.jerk / 1000 / 1000 / 1000 / R * pos_ratio* pos_ratio* pos_ratio, p, v, a, j, pos_total_count);
+
 		double pqr[7]{ C[0], C[1], C[2], w[0] * sin(p / 2.0), w[1] * sin(p / 2.0), w[2] * sin(p / 2.0), cos(p / 2.0) };
 		double pos[4]{ mvc_param.ee_begin_pq[0] - C[0], mvc_param.ee_begin_pq[1] - C[1], mvc_param.ee_begin_pq[2] - C[2], 1};
 		aris::dynamic::s_pq2pm(pqr, pmr);
 		s_mm(4, 1, 4, pmr, aris::dynamic::RowMajor{ 4 }, pos, 1, pqt, 1);
 
 		//姿态规划//
-		aris::plan::moveAbsolute(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0 * ori_ratio, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0 * ori_ratio * ori_ratio, mvc_param.angular_dec / 1000 / 1000 / ori_theta / 2.0* ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		//aris::plan::moveAbsolute(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0 * ori_ratio, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0 * ori_ratio * ori_ratio, mvc_param.angular_dec / 1000 / 1000 / ori_theta / 2.0* ori_ratio * ori_ratio, p, v, a, ori_total_count);
+		traplan::sCurve(target.count, 0.0, 1.0, mvc_param.angular_vel / 1000 / ori_theta / 2.0 * ori_ratio, mvc_param.angular_acc / 1000 / 1000 / ori_theta / 2.0 * ori_ratio * ori_ratio, mvc_param.angular_jerk / 1000 / 1000 /1000 / ori_theta / 2.0* ori_ratio * ori_ratio* ori_ratio, p, v, a, j, ori_total_count);
 		slerp(mvc_param.ee_begin_pq.data() + 3, mvc_param.ee_end_pq.data() + 3, pqt + 3, p);
 		
 		//雅克比矩阵判断奇异点//
@@ -2428,7 +2692,10 @@ namespace kaanh
 		}
 
 		// set目标位置，并进行运动学反解 //
-		target.model->generalMotionPool().at(0).setMpq(pqt);
+		//target.model->generalMotionPool().at(0).setMpq(pqt);
+		mvc_param.tool->setPq(*mvc_param.wobj, pqt);
+		target.model->generalMotionPool().at(0).updMpm();
+
 		if (target.model->solverPool().at(0).kinPos())return -1;
 
 		////////////////////////////////////// log ///////////////////////////////////////
@@ -2445,7 +2712,7 @@ namespace kaanh
 			*/
 			lout << std::endl;
 		}
-		//////////////////////////////////////////////////////////////////////////////////
+		
 		if (g_move_stop)
 		{
 			return -4;
@@ -2480,9 +2747,13 @@ namespace kaanh
 			"		<Param name=\"acc\" default=\"0.1\"/>"
 			"		<Param name=\"vel\" default=\"0.1\"/>"
 			"		<Param name=\"dec\" default=\"0.1\"/>"
+			"		<Param name=\"jerk\" default=\"0.1\"/>"
 			"		<Param name=\"angular_acc\" default=\"0.1\"/>"
 			"		<Param name=\"angular_vel\" default=\"0.1\"/>"
 			"		<Param name=\"angular_dec\" default=\"0.1\"/>"
+			"		<Param name=\"angular_jerk\" default=\"0.1\"/>"
+			"		<Param name=\"tool\" default=\"tool0\"/>"
+			"		<Param name=\"wobj\" default=\"wobj0\"/>"
 			"	</GroupParam>"
 			"</Command>");
 	}
@@ -3157,7 +3428,7 @@ namespace kaanh
 		int increase_status;
 		int increase_count;
 		int vel_percent;
-		static std::atomic_int32_t j1_count, j2_count, j3_count, j4_count, j5_count, j6_count;
+		static std::atomic_int32_t j1_count, j2_count, j3_count, j4_count, j5_count, j6_count, j7_count;
 	};
 	template<typename JogType>
 	auto set_jogj_input_param(JogType* this_p, const std::map<std::string, std::string> &cmd_params, PlanTarget &target, JogJParam &param, std::atomic_int32_t& j_count)->void
@@ -3190,7 +3461,7 @@ namespace kaanh
 
 				std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
 				//当前有指令在执行//
-				if (planptr && planptr->plan != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+				if (planptr && planptr->plan.get() != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
 				if (j_count.exchange(param.increase_count))
 				{
 					target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
@@ -3875,6 +4146,165 @@ namespace kaanh
 	}
 
 
+	// 示教运动--外部轴点动 //
+	std::atomic_int32_t JogJParam::j7_count = 0;
+	auto JogJ7::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		auto&cs = aris::server::ControlServer::instance();
+		auto c = target.controller;
+		JogJParam param;
+
+		std::vector<std::pair<std::string, std::any>> ret;
+		target.ret = ret;
+
+		param.motion_id = 6;
+		param.p_now = 0.0;
+		param.v_now = 0.0;
+		param.a_now = 0.0;
+		param.target_pos = 0.0;
+		param.max_vel = 0.0;
+		param.increase_status = 0;
+		param.vel_percent = 0;
+
+		for (auto &p : params)
+		{
+			if (p.first == "increase_count")
+			{
+				param.increase_count = std::stoi(params.at("increase_count"));
+				if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
+
+				param.vel = std::min(std::max(std::stod(params.at("vel")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxVel();
+				param.acc = std::min(std::max(std::stod(params.at("acc")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
+				param.dec = std::min(std::max(std::stod(params.at("dec")), 0.0), 1.0)*c->motionPool().at(param.motion_id).maxAcc();
+
+				auto velocity = std::stoi(params.at("vel_percent"));
+				velocity = std::max(std::min(100, velocity), 0);
+				param.vel_percent = velocity;
+				param.increase_status = std::max(std::min(1, std::stoi(params.at("direction"))), -1);
+
+				std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
+				//当前有指令在执行//
+				if (planptr && planptr->plan.get() != this)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+
+				if (param.j7_count.exchange(param.increase_count))
+				{
+					target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+				}
+				else
+				{
+					std::fill(target.mot_options.begin(), target.mot_options.end(), NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER | NOT_CHECK_ENABLE);
+					target.mot_options[param.motion_id] = NOT_CHECK_POS_FOLLOWING_ERROR | NOT_CHECK_POS_CONTINUOUS_SECOND_ORDER;
+				}
+			}
+			else if (p.first == "stop")
+			{
+				param.j7_count.exchange(0);
+				target.option |= aris::plan::Plan::Option::NOT_RUN_EXECUTE_FUNCTION | aris::plan::Plan::Option::NOT_RUN_COLLECT_FUNCTION;
+			}
+		}
+
+		target.param = param;
+	}
+	auto JogJ7::executeRT(PlanTarget &target)->int
+	{
+		//获取驱动//
+		auto controller = target.controller;
+		auto &param = std::any_cast<JogJParam&>(target.param);
+
+		// get current pos //
+		if (target.count == 1)
+		{
+			param.target_pos = controller->motionAtAbs(param.motion_id).actualPos();
+			param.p_now = controller->motionAtAbs(param.motion_id).actualPos();
+			param.v_now = controller->motionAtAbs(param.motion_id).actualVel();
+			param.a_now = 0.0;
+		}
+
+		// init status and calculate target pos and max vel //
+		param.max_vel = param.vel*1.0*g_vel_percent.load() / 100.0;
+		param.target_pos += aris::dynamic::s_sgn(param.increase_status)*param.max_vel * 1e-3;
+
+		// 梯形轨迹规划 //
+		static double p_next, v_next, a_next;
+
+		aris::Size t;
+		auto finished = aris::plan::moveAbsolute2(param.p_now, param.v_now, param.a_now
+			, param.target_pos, 0.0, 0.0
+			, param.max_vel, param.acc, param.dec
+			, 1e-3, 1e-10, p_next, v_next, a_next, t);
+
+		//当计数器j7_count等于0时，increase_status=0，即目标位置不再变更//
+		if (param.j7_count == 0)
+		{
+			param.increase_status = 0;
+		}
+		else
+		{
+			--param.j7_count;
+		}
+
+		controller->motionAtAbs(param.motion_id).setTargetPos(p_next);
+		param.p_now = p_next;
+		param.v_now = v_next;
+		param.a_now = a_next;
+
+		// 打印 //
+		auto &cout = controller->mout();
+		if (target.count % 10 == 0)
+		{
+			cout << param.j7_count << "  ";
+			cout << param.target_pos << "  ";
+			cout << param.p_now << "  ";
+			cout << param.v_now << "  ";
+			cout << param.a_now << "  ";
+			cout << "------------------------------------------" << std::endl;
+		}
+
+		// log //
+		auto &lout = controller->lout();
+		{
+			lout << param.target_pos << " ";
+			lout << param.p_now << " ";
+			lout << param.v_now << " ";
+			lout << param.a_now << " ";
+			lout << controller->motionAtAbs(param.motion_id).actualPos() << " ";
+			lout << controller->motionAtAbs(param.motion_id).actualVel() << " ";
+			lout << std::endl;
+		}
+
+		return finished;
+	}
+	auto JogJ7::collectNrt(PlanTarget &target)->void
+	{
+		JogJParam::j7_count = 0;
+		if (target.ret_code < 0)
+		{
+			JogJParam::j7_count.store(0);
+		}
+	}
+	JogJ7::~JogJ7() = default;
+	JogJ7::JogJ7(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"j7\">"
+			"	<GroupParam>"
+			"		<UniqueParam>"
+			"			<GroupParam>"
+			"				<Param name=\"increase_count\" default=\"500\"/>"
+			"				<Param name=\"vel\" default=\"1\" abbreviation=\"v\"/>"
+			"				<Param name=\"acc\" default=\"5\" abbreviation=\"a\"/>"
+			"				<Param name=\"dec\" default=\"5\" abbreviation=\"d\"/>"
+			"				<Param name=\"vel_percent\" default=\"10\"/>"
+			"				<Param name=\"direction\" default=\"1\"/>"
+			"			</GroupParam>"
+			"			<Param name=\"stop\"/>"
+			"		</UniqueParam>"
+			"	</GroupParam>"
+			"</Command>");
+	}
+
+
+
 #define JOGC_PARAM_STRING \
 		"	<UniqueParam>"\
 		"		<GroupParam>"\
@@ -3918,7 +4348,7 @@ namespace kaanh
 
 				param.tool = &*target.model->generalMotionPool()[0].makI().fatherPart().markerPool().findByName(cmd_params.at("tool"));
 				param.wobj = &*target.model->generalMotionPool()[0].makJ().fatherPart().markerPool().findByName(cmd_params.at("wobj"));
-
+				
 				param.increase_count = std::stoi(cmd_params.at("increase_count"));
 				if (param.increase_count < 0 || param.increase_count>1e5)THROW_FILE_LINE("");
 
@@ -3946,7 +4376,7 @@ namespace kaanh
 				std::shared_ptr<aris::plan::PlanTarget> planptr = cs.currentExecuteTarget();
 
 				//当前有指令在执行//
-				if (planptr && planptr->plan != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
+				if (planptr && planptr->plan.get() != this_p)throw std::runtime_error(__FILE__ + std::to_string(__LINE__) + "Other command is running");
 
 				if (j_count.exchange(param.increase_count))
 				{
@@ -5470,45 +5900,6 @@ namespace kaanh
 	}
 
 
-	// 保存配置 //
-	struct SaveXmlParam
-	{
-		std::string path;
-	};
-	auto SaveXml::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
-	{
-		auto&cs = aris::server::ControlServer::instance();
-		if (cs.running())throw std::runtime_error("cs is running, please stop the cs using cs_stop!");
-		
-		SaveXmlParam param;
-		for (auto &p : params)
-		{
-			if (p.first == "path")
-			{
-				param.path = p.second;
-			}
-		}
-		const std::string xmlfile = "kaanh.xml";
-		param.path = param.path + '/' + xmlfile;
-
-		std::cout << "path:" << param.path << std::endl;
-		cs.saveXmlFile(param.path.c_str());
-
-		std::vector<std::pair<std::string, std::any>> ret;
-		target.ret = ret;
-		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
-	}
-	SaveXml::SaveXml(const std::string &name) :Plan(name)
-	{
-		command().loadXmlStr(
-			"<Command name=\"savexml\">"
-			"	<GroupParam>"
-			"		<Param name=\"path\" default=\"\"/>"
-			"	</GroupParam>"
-			"</Command>");
-	}
-
-
 	// 从硬件扫描从站 //
 	auto ScanSlave::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
@@ -5628,57 +6019,6 @@ namespace kaanh
 	}
 
 
-	// 开启controller server //
-	auto StartCS::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
-	{	
-		/*
-        std::cout<<0<<std::endl;
-		auto&cs = aris::server::ControlServer::instance();
-		if (cs.running())throw std::runtime_error("cs is already running!");
-        std::cout<<1<<std::endl;
-        cs.start();
-		
-        std::cout<<2<<std::endl;
-		*/
-		std::string data = "collectcmd --cmdlist={1:moveJ\r\n2:moveJ\r\n3:moveL\r\n}";
-		auto begin_pos = data.find("{");
-		auto end_pos = data.rfind("}");
-		auto cmd_str = data.substr(begin_pos + 1, end_pos - 1 - begin_pos);
-		std::cout << "cmd_str:" << cmd_str << std::endl;
-		char *s_input = (char *)cmd_str.c_str();
-		std::ifstream infile(s_input);
-
-		const char *split = "\r\n";
-		// 以‘ ’为分隔符拆分字符串
-		char *sp_input = strtok(s_input, split);
-		//std::string mid = sp_input;
-		std::cout << "sp_input:" << sp_input << std::endl;
-		if (strcmp(sp_input, "collectcmd") == 0)
-		{
-			std::cout << "sp_input=" << "collectcmd" << std::endl;
-		}
-
-		double data_input;
-		int i = 0;
-		while (sp_input != NULL)
-		{
-			std::string str = sp_input;
-			std::cout << "str:" << str << std::endl;
-			sp_input = strtok(NULL, split);
-		}
-
-		std::vector<std::pair<std::string, std::any>> ret;
-		target.ret = ret;
-		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
-	}
-	StartCS::StartCS(const std::string &name) :Plan(name)
-	{
-		command().loadXmlStr(
-			"<Command name=\"startCS\">"
-			"</Command>");
-	}
-
-
 	// update controller //
 	auto Update::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
@@ -5695,24 +6035,117 @@ namespace kaanh
 	}
 
 
-	// 关闭controller server //
-	auto StopCS::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	// 保存配置 //
+	struct SaveXmlParam
+	{
+		std::string path;
+	};
+	auto SaveXml::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
 		auto&cs = aris::server::ControlServer::instance();
-		if (!cs.running())throw std::runtime_error("cs is already stopping!");
-		cs.stop();
+		if (cs.running())throw std::runtime_error("cs is running, please stop the cs using cs_stop!");
+
+		SaveXmlParam param;
+		for (auto &p : params)
+		{
+			if (p.first == "path")
+			{
+				param.path = p.second;
+			}
+		}
+		const std::string xmlfile = "kaanh.xml";
+		param.path = param.path + '/' + xmlfile;
+
+		std::cout << "path:" << param.path << std::endl;
+		cs.saveXmlFile(param.path.c_str());
+
 		std::vector<std::pair<std::string, std::any>> ret;
 		target.ret = ret;
 		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
 	}
-	StopCS::StopCS(const std::string &name) :Plan(name)
+	SaveXml::SaveXml(const std::string &name) :Plan(name)
 	{
 		command().loadXmlStr(
-			"<Command name=\"stopCS\">"
+			"<Command name=\"savexml\">"
+			"	<GroupParam>"
+			"		<Param name=\"path\" default=\"\"/>"
+			"	</GroupParam>"
 			"</Command>");
 	}
 
+
+	auto GetXml::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		ret_value.push_back(std::make_pair(std::string("configure_xml"), target.server->xmlString()));
+		target.ret = ret_value;
+		target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+	}
+	GetXml::~GetXml() = default;
+	GetXml::GetXml(const std::string &name) : Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"get_xml\">"
+			"</Command>");
+	}
+
+
+	auto SetXml::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		// remove all symbols "{" "}"
+		if (target.server->running())THROW_FILE_LINE("server is running, can't set xml");
+		auto xml_str = params.at("xml").substr(1, params.at("xml").size() - 2);
+		// 这一句要小心，此时 this 已被销毁，后面不能再调用this了 //
+		target.server->loadXmlStr(xml_str);
+		target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	SetXml::~SetXml() = default;
+	SetXml::SetXml(const std::string &name) : Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"set_xml\">"
+			"	<Param name=\"xml\"/>"
+			"</Command>");
+	}
+
+
+	auto Start::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		target.server->start();
+		target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	Start::~Start() = default;
+	Start::Start(const std::string &name) : Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"cs_start\">"
+			"</Command>");
+	}
+
+
+	auto Stop::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		target.server->stop();
+		target.option |= NOT_RUN_EXECUTE_FUNCTION | NOT_RUN_COLLECT_FUNCTION;
+
+		std::vector<std::pair<std::string, std::any>> ret_value;
+		target.ret = ret_value;
+	}
+	Stop::~Stop() = default;
+	Stop::Stop(const std::string &name) : Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"cs_stop\">"
+			"</Command>");
+	}
 	
+
 	// set cycle_time for driver with SDO //
 	struct SetCTParam
 	{
@@ -5784,6 +6217,58 @@ namespace kaanh
 	}
 
 
+	//var//
+	struct VarParam
+	{
+		std::string name;
+		std::string value;
+		std::string type;
+	};
+	auto Var::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		VarParam param;
+		for (auto &p : params)
+		{
+			if(p.first == "name")
+			{
+				param.name = p.second;
+			}
+			else if (p.first == "value")
+			{
+				param.value = p.second;
+			}
+			else if (p.first == "type")
+			{
+				param.type = p.second;
+			}
+		}
+		aris::core::Calculator c;
+		if ((param.type == "int") || (param.type == "double") || (param.type == "bool") || (param.type == "array"))
+		{
+			c.addVariable(param.name, target.model->calculator().calculateExpression(param.value));
+		}
+		else if (param.type == "string")
+		{
+
+		}
+
+		std::vector<std::pair<std::string, std::any>> ret;
+		target.ret = ret;
+		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
+	}
+	Var::Var(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"var\">"
+			"	<GroupParam>"
+			"		<Param name=\"name\" default=\"0\"/>"
+			"		<Param name=\"value\" default=\"0\"/>"
+			"		<Param name=\"type\" default=\"0\"/>"
+			"	</GroupParam>"
+			"</Command>");
+	}
+
+
 	//运行指令//
 	struct RunParam
 	{
@@ -5831,29 +6316,32 @@ namespace kaanh
 							auto&cs = aris::server::ControlServer::instance();
 							{
 								std::unique_lock<std::mutex> run_lock(mymutex);
-								if ((cmdparam.current_cmd_id >= cmdparam.cmd_vec.size()) || (cmdparam.current_cmd_id < 0))
+								auto iter = cmdparam.cmd_vec.find(cmdparam.current_cmd_id);
+								if (iter == cmdparam.cmd_vec.end())
 								{
 									set_is_auto_executing(false);
 									return;
 								}
 								else
 								{
-									cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.current_cmd_id].first);
+									cmdparam.current_plan_id = iter->first;
 								}			
 							}
-							cs.executeCmd(aris::core::Msg(cmdparam.cmd_vec[cmdparam.current_cmd_id].second), [&](aris::plan::PlanTarget &target)->void
+							cs.executeCmd(aris::core::Msg(cmdparam.cmd_vec[cmdparam.current_cmd_id]), [&](aris::plan::PlanTarget &target)->void
 							{
 								std::unique_lock<std::mutex> run_lock(mymutex);
-								std::cout << "current_cmd_id:" << cmdparam.current_cmd_id << std::endl;
-								if (cmdparam.current_cmd_id >= cmdparam.cmd_vec.size() - 1)
+								auto iter = cmdparam.cmd_vec.find(cmdparam.current_cmd_id);
+								iter++;
+								std::cout << "current_cmd_id:" << iter->second << std::endl;
+								if (iter != cmdparam.cmd_vec.end())
 								{
-									cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.cmd_vec.size() - 1].first) + 1;
+									cmdparam.current_plan_id = iter->first;
+									cmdparam.current_cmd_id = iter->first;
 								}
 								else
 								{
-									cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.current_cmd_id + 1].first);
+									cmdparam.current_plan_id = cmdparam.cmd_vec.rbegin()->first + 1;
 								}
-								cmdparam.current_cmd_id += 1;
 								set_is_auto_executing(false);
 							});
 						}
@@ -5867,6 +6355,7 @@ namespace kaanh
 			}
 			else if (p.first == "goto")
 			{
+				param->goto_cmd_id = std::stoi(p.second);
 				//有指令在执行//
 				if (is_auto_executing())
 				{
@@ -5879,18 +6368,19 @@ namespace kaanh
 					set_is_auto_executing(is_goto);
 					param->run = std::thread([&]()->void
 					{
-						param->goto_cmd_id = std::stoi(p.second);
 						bool is_existed = false;
 						{
 							std::unique_lock<std::mutex> run_lock(mymutex);
-							for (int i = 0; i < cmdparam.cmd_vec.size(); i++)
+							for (auto iter = cmdparam.cmd_vec.begin(); iter != cmdparam.cmd_vec.end(); ++iter)
 							{
-								if ((std::stoi(cmdparam.cmd_vec[i].first) == param->goto_cmd_id) && (cmdparam.current_cmd_id != i))
+								if ((iter->first == param->goto_cmd_id) && (cmdparam.current_cmd_id != iter->first))
 								{
-									cmdparam.current_cmd_id = i - 1;
+									auto temp_iter = iter;
+									temp_iter--;
+									cmdparam.current_cmd_id = temp_iter->first;
 									cmdparam.current_cmd_id = std::max(cmdparam.current_cmd_id, 0);
 									is_existed = true;
-									cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.current_cmd_id].first);
+									cmdparam.current_plan_id = cmdparam.cmd_vec.find(cmdparam.current_cmd_id)->first;
 								}
 							}
 						}
@@ -5903,18 +6393,19 @@ namespace kaanh
 						{
 							try
 							{	
-								aris::server::ControlServer::instance().executeCmd(aris::core::Msg(cmdparam.cmd_vec[cmdparam.current_cmd_id].second), [&](aris::plan::PlanTarget &target)->void
+								aris::server::ControlServer::instance().executeCmd(aris::core::Msg(cmdparam.cmd_vec[cmdparam.current_cmd_id]), [&](aris::plan::PlanTarget &target)->void
 								{
 									std::unique_lock<std::mutex> run_lock(mymutex);
-									if (cmdparam.current_cmd_id >= cmdparam.cmd_vec.size() - 1)
+									auto iter = cmdparam.cmd_vec.find(cmdparam.current_cmd_id);
+									iter++;
+									if (iter != cmdparam.cmd_vec.end())
 									{
-										cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.cmd_vec.size() - 1].first) + 1;
-										cmdparam.current_cmd_id = cmdparam.cmd_vec.size() - 1;
+										cmdparam.current_plan_id = iter->first;
+										cmdparam.current_cmd_id = iter->first;
 									}
 									else
 									{
-										cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.current_cmd_id + 1].first);
-										cmdparam.current_cmd_id += 1;
+										cmdparam.current_plan_id = cmdparam.cmd_vec.rbegin()->first + 1;
 									}
 									const bool is_not_goto = false;
 									set_is_auto_executing(is_not_goto);
@@ -5931,7 +6422,8 @@ namespace kaanh
 
 			}
 			else if (p.first == "start")
-			{		
+			{	
+				g_is_auto.store(true);
 				//有指令在执行//
 				if (is_auto_executing())
 				{
@@ -5950,35 +6442,36 @@ namespace kaanh
 							auto&cs = aris::server::ControlServer::instance();
 							{
 								std::unique_lock<std::mutex> run_lock(mymutex);
-								if ((cmdparam.current_cmd_id >= cmdparam.cmd_vec.size()) || (cmdparam.current_cmd_id < 0))
+								auto iter = cmdparam.cmd_vec.find(cmdparam.current_cmd_id);
+								if (iter == cmdparam.cmd_vec.end())
 								{
 									set_is_auto_executing(false);
 									return;
 								}
 								else
 								{
-									cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[cmdparam.current_cmd_id].first);
-									begin_cmd_id = cmdparam.current_cmd_id;
-									end_cmd_id = cmdparam.cmd_vec.size();
+									cmdparam.current_plan_id = iter->first;
 								}
 							}
-							for (int i = begin_cmd_id; i < end_cmd_id; i++)
+							for (auto iter = cmdparam.cmd_vec.find(cmdparam.current_cmd_id); iter != cmdparam.cmd_vec.end(); ++iter)
 							{
-								cs.executeCmd(aris::core::Msg(cmdparam.cmd_vec[i].second), [i](aris::plan::PlanTarget &target)->void
+								cs.executeCmd(aris::core::Msg(iter->second), [iter](aris::plan::PlanTarget &target)->void
 								{
 									std::unique_lock<std::mutex> run_lock(mymutex);
-									if (i < cmdparam.cmd_vec.size() - 1)
+									auto temp_iter = iter;
+									temp_iter++;
+									if (temp_iter != cmdparam.cmd_vec.end())
 									{
-										cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[i + 1].first);	
-										cmdparam.current_cmd_id += 1;
+										cmdparam.current_plan_id = temp_iter->first;
+										cmdparam.current_cmd_id = temp_iter->first;
 									}
 									else
 									{
-										cmdparam.current_plan_id = std::stoi(cmdparam.cmd_vec[i].first) + 1;
-										cmdparam.current_cmd_id += 1;
+										cmdparam.current_plan_id = cmdparam.cmd_vec.rbegin()->first + 1;
 										const bool is_not_start = false;
 										set_is_auto_executing(is_not_start);
-									}								
+									}
+									g_is_auto.store(false);
 								});
 							}
 						}
@@ -6035,7 +6528,7 @@ namespace kaanh
 
 
 	//编程界面指令//
-	bool splitString(std::string spCharacter, const std::string& objString, std::vector<std::pair<std::string, std::string>>& stringVector)
+	bool splitString(std::string spCharacter, const std::string& objString, std::map<int, std::string>& stringVector)
 	{
 		if (objString.length() == 0)
 		{
@@ -6062,7 +6555,7 @@ namespace kaanh
 			auto sep_pos = str.find(":");
 			auto id = str.substr(0, sep_pos);
 			auto command = str.substr(sep_pos + 1);
-			stringVector.push_back(std::make_pair<std::string, std::string>(id.c_str(), command.c_str()));
+			stringVector.insert(std::pair<int, std::string>(std::stoi(id), command.c_str()));
 			posEnd += spCharacter.size();
 		}
 		return true;
@@ -6070,15 +6563,17 @@ namespace kaanh
 	auto onReceivedMsg(aris::core::Socket *socket, aris::core::Msg &msg)->int
 	{
 		std::string msg_data = msg.toString();
-
-		LOG_INFO << "receive cmd:"
-			<< msg.header().msg_size_ << "&"
-			<< msg.header().msg_id_ << "&"
-			<< msg.header().msg_type_ << "&"
-			<< msg.header().reserved1_ << "&"
-			<< msg.header().reserved2_ << "&"
-			<< msg.header().reserved3_ << ":"
-			<< msg_data << std::endl;
+		
+		{
+			LOG_INFO << "receive cmd:"
+				<< msg.header().msg_size_ << "&"
+				<< msg.header().msg_id_ << "&"
+				<< msg.header().msg_type_ << "&"
+				<< msg.header().reserved1_ << "&"
+				<< msg.header().reserved2_ << "&"
+				<< msg.header().reserved3_ << ":"
+				<< msg_data << std::endl;
+		}
 
 		//std::string data = "collectcmd --cmdlist = {1:moveJ\r\n2:moveJ\r\n3:moveL\r\n}";
 		std::string s = " --";
@@ -6136,7 +6631,17 @@ namespace kaanh
 					cmd = strtok(NULL, split);
 				}
 				*/
-				std::cout << "cmd_vec:" << cmdparam.cmd_vec[0].first << std::endl;
+				
+				auto iter = cmdparam.cmd_vec.begin();
+				if (iter != cmdparam.cmd_vec.end())
+				{
+					cmdparam.current_cmd_id = iter->first;
+					std::cout << "cmd_vec:" << iter->second << std::endl;
+				}
+				else
+				{
+					std::cout << "cmd_vec is null" << std::endl;
+				}	
 			}
 			else
 			{
@@ -6253,6 +6758,8 @@ namespace kaanh
 	auto MoveSt::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
 	{
 		g_move_stop = true;
+		std::vector<std::pair<std::string, std::any>> ret;
+		target.ret = ret;
 		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
 	}
 	MoveSt::MoveSt(const std::string &name) :Plan(name)
@@ -6262,7 +6769,36 @@ namespace kaanh
 			"</Command>");
 	}
 
-    auto createPlanRootRokaeXB4()->std::unique_ptr<aris::plan::PlanRoot>
+
+	// 手动--自动模式切换； manual=1，手动;manual=0，自动//
+	struct SwitchParam
+	{
+		bool is_manual;
+	};
+	auto Switch::prepairNrt(const std::map<std::string, std::string> &params, PlanTarget &target)->void
+	{
+		SwitchParam param;
+		for (auto &p : params)
+		{
+			if (p.first == "manual")
+			{
+				param.is_manual = std::stoi(p.second);
+			}
+		}
+		g_is_manual.store(param.is_manual);
+		std::vector<std::pair<std::string, std::any>> ret;
+		target.ret = ret;
+		target.option = aris::plan::Plan::NOT_RUN_EXECUTE_FUNCTION;
+	}
+	Switch::Switch(const std::string &name) :Plan(name)
+	{
+		command().loadXmlStr(
+			"<Command name=\"switch\">"
+			"		<Param name=\"manual\" default=\"1\"/>"
+			"</Command>");
+	}
+
+    auto createPlanRoot()->std::unique_ptr<aris::plan::PlanRoot>
 	{
         std::unique_ptr<aris::plan::PlanRoot> plan_root(new aris::plan::PlanRoot);
 
@@ -6270,7 +6806,6 @@ namespace kaanh
         plan_root->planPool().add<kaanh::Disable>();
         plan_root->planPool().add<kaanh::Home>();
         plan_root->planPool().add<kaanh::Mode>();
-        plan_root->planPool().add<aris::plan::Show>();
         plan_root->planPool().add<kaanh::Sleep>();
         plan_root->planPool().add<kaanh::Recover>();
         auto &rs = plan_root->planPool().add<kaanh::Reset>();
@@ -6283,11 +6818,6 @@ namespace kaanh
         plan_root->planPool().add<kaanh::MoveL>();
         plan_root->planPool().add<kaanh::MoveJ>();
 		plan_root->planPool().add<kaanh::MoveSt>();
-
-        plan_root->planPool().add<aris::plan::GetXml>();
-        plan_root->planPool().add<aris::plan::SetXml>();
-        plan_root->planPool().add<aris::plan::Start>();
-        plan_root->planPool().add<aris::plan::Stop>();
 
 		plan_root->planPool().add<kaanh::Get>();
 		plan_root->planPool().add<forcecontrol::MoveJRC>();
@@ -6309,6 +6839,7 @@ namespace kaanh
 		plan_root->planPool().add<kaanh::JogJ4>();
 		plan_root->planPool().add<kaanh::JogJ5>();
 		plan_root->planPool().add<kaanh::JogJ6>();
+		plan_root->planPool().add<kaanh::JogJ7>();
 		plan_root->planPool().add<kaanh::JX>();
 		plan_root->planPool().add<kaanh::JY>();
 		plan_root->planPool().add<kaanh::JZ>();
@@ -6326,11 +6857,15 @@ namespace kaanh
 		plan_root->planPool().add<kaanh::ScanSlave>();
 		plan_root->planPool().add<kaanh::GetEsiPdoList>();
 		plan_root->planPool().add<kaanh::SetEsiPath>();
+		plan_root->planPool().add<kaanh::GetXml>();
+		plan_root->planPool().add<kaanh::SetXml>();
+		plan_root->planPool().add<kaanh::Start>();
+		plan_root->planPool().add<kaanh::Stop>();
 		plan_root->planPool().add<kaanh::SetCT>();
 		plan_root->planPool().add<kaanh::SetVel>();
 		plan_root->planPool().add<kaanh::Run>();
-		plan_root->planPool().add<kaanh::StartCS>();
 		plan_root->planPool().add<kaanh::MoveF>();
+		plan_root->planPool().add<kaanh::Switch>();
 
 		plan_root->planPool().add<MoveXYZ>();
 		plan_root->planPool().add<MoveJoint>();
